@@ -8,6 +8,685 @@ from dateutil.relativedelta import relativedelta
 import io
 import re
 
+FG_DEFAULT_FG_PATH = Path(
+    r"C:\Users\ashalaby\OneDrive - Halwani Bros\Planning - Sources\new view 2023\FP module 23.xlsb"
+)
+FG_PRIMARY_SHEETS = ("Data", "Data2")
+FG_TEXT_COLUMNS = {
+    "itemnumber",
+    "itemname",
+    "factory",
+    "family",
+    "unit",
+    "brand",
+    "category",
+    "subfamily",
+    "subfamilyname",
+    "group",
+    "subgroup",
+    "market",
+    "storagetype",
+    "rawtype",
+}
+FG_METRIC_ORDER = [
+    "CurOS",
+    "CurAPP",
+    "CurAP",
+    "CurOST",
+    "CurST",
+    "CurAS",
+    "CurFOC",
+    "Oh",
+    "NextOS",
+]
+FG_METRIC_LABELS = {
+    "CurOS": "Opening Stock (CurOS)",
+    "CurAPP": "Production Plan (CurAPP)",
+    "CurAP": "Actual Production (CurAP)",
+    "CurOST": "Original Sales Target (CurOST)",
+    "CurST": "Sales Target (CurST)",
+    "CurAS": "Actual Sales (CurAS)",
+    "CurFOC": "Free of Charge (CurFOC)",
+    "Oh": "On Hand (OH)",
+    "NextOS": "Next Opening Stock (NextOS)",
+}
+FG_MONTHLY_METRIC_CODES = ["BP_CUR", "BP_PRV", "AS"]
+FG_MONTHLY_METRIC_LABELS = {
+    "BP_CUR": "Current BP",
+    "BP_PRV": "Previous BP",
+    "AS": "Actual Sales",
+}
+FG_WEEKLY_METRICS = ["CurST", "CurAS", "CurAPP", "CurAP"]
+FG_MONTH_ABBR = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+FG_WEEKLY_METRIC_LABELS = {
+    "CurST": "Sales Target",
+    "CurAS": "Actual Sales",
+    "CurAPP": "Production Plan",
+    "CurAP": "Actual Production",
+}
+FG_METRIC_COLOR_MAP = {
+    "CurOS": "#f7dc6f",
+    "CurAPP": "#8e5b32",
+    "CurAP": "#ff7f0e",
+    "CurOST": "#5dade2",
+    "CurST": "#1f77b4",
+    "CurAS": "#2ecc71",
+    "CurFOC": "#af7ac5",
+    "Oh": "#f1c40f",
+    "NextOS": "#f9e79f",
+    "OS": "#f7dc6f",
+    "ST": "#1f77b4",
+    "AS": "#2ecc71",
+    "APP": "#8e5b32",
+    "AP": "#ff7f0e",
+    "OST": "#5dade2",
+    "RFC": "#5dade2",
+    "BP_CUR": "#1f77b4",
+    "BP_PRV": "#95a5a6",
+}
+FG_METRIC_CANDIDATES = {
+    "CurOS": ["CurOS", "CurSOH", "CurStockOnHand", "CurOpeningStock"],
+    "CurAPP": ["CurAPP"],
+    "CurAP": ["CurAP"],
+    "CurOST": ["CurOST", "CurOrigST", "CurOriginalST"],
+    "CurST": ["CurST"],
+    "CurAS": ["CurAS"],
+    "CurFOC": ["CurFOC", "FOC", "CurFOCQty"],
+    "Oh": ["Oh", "OH", "OnHand", "StockOnHand", "SOH"],
+    "NextOS": ["NextOS", "NextSOH", "NextStockOnHand"],
+}
+FG_WEEK_RANGE = range(1, 6)
+FG_TARGET_YEAR_SUFFIX = "26"
+FG_MONTH_SEQUENCE = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+FG_MONTH_LABELS = [f"{month}{FG_TARGET_YEAR_SUFFIX}" for month in FG_MONTH_SEQUENCE]
+FG_BP_COLUMN_PATTERN = re.compile(r"^(?P<prefix>.*?)(?P<month>[A-Za-z]{3})(?P<year>\d{2})BP$", re.IGNORECASE)
+FG_AS_COLUMN_PATTERN = re.compile(r"^(?P<prefix>.*?)(?P<month>[A-Za-z]{3})(?P<year>\d{2})AS$", re.IGNORECASE)
+FG_DC_LOCATION_MAP = {
+    "10th of Ramadan": {"lat": 30.2920, "lon": 31.7500},
+    "Ramadan": {"lat": 30.2920, "lon": 31.7500},
+    "Cairo": {"lat": 30.0444, "lon": 31.2357},
+    "Alex": {"lat": 31.2001, "lon": 29.9187},
+    "Alexandria": {"lat": 31.2001, "lon": 29.9187},
+    "Gharbeya": {"lat": 30.7865, "lon": 31.0004},
+    "Tanta": {"lat": 30.7865, "lon": 31.0004},
+    "Upper Egypt": {"lat": 25.6872, "lon": 32.6396},
+    "Luxor": {"lat": 25.6872, "lon": 32.6396},
+    "Giza": {"lat": 30.0131, "lon": 31.2089},
+    "Beheira": {"lat": 31.0341, "lon": 30.4682},
+    "Damanhour": {"lat": 31.0341, "lon": 30.4682},
+    "Zagazig": {"lat": 30.5877, "lon": 31.5020},
+    "Isma3leya": {"lat": 30.6043, "lon": 32.2723},
+}
+
+
+@st.cache_data(show_spinner=False)
+def load_fg_dataset(file_bytes: bytes | None) -> pd.DataFrame:
+    source = io.BytesIO(file_bytes) if file_bytes else FG_DEFAULT_FG_PATH
+    try:
+        sheets = pd.read_excel(source, sheet_name=list(FG_PRIMARY_SHEETS), engine="pyxlsb")
+    except FileNotFoundError:
+        raise
+    except ValueError:
+        source = io.BytesIO(file_bytes) if file_bytes else FG_DEFAULT_FG_PATH
+        sheets = pd.read_excel(source, sheet_name=[FG_PRIMARY_SHEETS[0]], engine="pyxlsb")
+
+    data_df = sheets.get("Data", pd.DataFrame())
+    data2_df = sheets.get("Data2", pd.DataFrame())
+
+    if data_df.empty:
+        return pd.DataFrame()
+
+    for df in (data_df, data2_df):
+        if df is None or df.empty:
+            continue
+        df.columns = [str(col).strip() for col in df.columns]
+        if "ItemNumber" in df.columns:
+            df["ItemNumber"] = df["ItemNumber"].astype(str).str.strip()
+
+    base_df = data_df.copy()
+
+    if data2_df is not None and not data2_df.empty:
+        data2_unique = data2_df.drop_duplicates(subset=["ItemNumber"])
+        merged_df = base_df.merge(
+            data2_unique,
+            on="ItemNumber",
+            how="left",
+            suffixes=("", "_d2")
+        )
+    else:
+        merged_df = base_df
+
+    merged_df.columns = [str(col).strip() for col in merged_df.columns]
+    merged_df = merged_df.dropna(how="all")
+
+    for column in merged_df.columns:
+        normalized = str(column).strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+        if normalized in FG_TEXT_COLUMNS:
+            merged_df[column] = merged_df[column].astype(str).str.strip()
+        else:
+            merged_df[column] = pd.to_numeric(merged_df[column], errors="ignore")
+
+    return merged_df
+
+
+def render_fg_explorer() -> None:
+    st.title("🏷️ FG Explorer")
+    st.subheader("Turn Planning Up")
+    st.caption("Analyze finished goods by cascading filters and KPIs.")
+
+    def _normalize_name(name: str | int) -> str:
+        return str(name).strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+
+    def _find_column(columns: pd.Index, candidates: list[str]) -> str | None:
+        lookup = {_normalize_name(col): col for col in columns}
+        for candidate in candidates:
+            actual = lookup.get(_normalize_name(candidate))
+            if actual is not None:
+                return actual
+        return None
+
+    def _unique_sorted_values(df: pd.DataFrame, column: str | None) -> list[str]:
+        if column is None or column not in df.columns:
+            return []
+        series = df[column].dropna().astype(str).str.strip()
+        return sorted({value for value in series if value and value.lower() != "all"})
+
+    def _resolve_prefix_label(prefix: str) -> tuple[str, int]:
+        prefix_lower = prefix.strip().lower()
+        if prefix_lower.startswith("prv"):
+            suffix = prefix[3:]
+            return (f"PRV{suffix}" if suffix else "PRV", -int(suffix) if suffix.isdigit() else -1)
+        if prefix_lower.startswith("cur"):
+            suffix = prefix[3:]
+            return (f"CUR{suffix.upper()}" if suffix else "CUR", 0)
+        if prefix_lower.startswith("next"):
+            suffix = prefix[4:]
+            return (f"NEXT{suffix}" if suffix else "NEXT", int(suffix) if suffix.isdigit() else 1)
+        match = re.match(r"(?P<month>[A-Za-z]{3})(?P<year>\d{2})(?P<suffix>[A-Za-z]*)", prefix.strip())
+        if match:
+            month = match.group("month").lower()
+            year = int(match.group("year")) + 2000
+            month_num = FG_MONTH_ABBR.get(month)
+            order = 100
+            if month_num:
+                base = pd.Timestamp.today().normalize().replace(day=1)
+                target = pd.Timestamp(year=year, month=month_num, day=1)
+                order = (target.year - base.year) * 12 + (target.month - base.month)
+            suffix = match.group("suffix").upper()
+            label = f"{match.group('month').title()}{match.group('year')}{suffix}" if suffix else f"{match.group('month').title()}{match.group('year')}"
+            return label, order
+        return prefix.upper(), 100
+
+    def _build_weekly_series(row: pd.Series) -> tuple[list[str], dict[str, list[float]]]:
+        labels: list[str] = []
+        series_map: dict[str, list[float]] = {metric: [] for metric in FG_WEEKLY_METRICS}
+        for week in FG_WEEK_RANGE:
+            week_label = f"W{week}"
+            has_data = False
+            cached: dict[str, float] = {}
+            for metric in FG_WEEKLY_METRICS:
+                column_name = _find_column(row.index, [f"{metric}W{week}"])
+                value = row[column_name] if column_name else np.nan
+                if pd.notna(value):
+                    has_data = True
+                cached[metric] = value
+            if has_data:
+                labels.append(week_label)
+                for metric in FG_WEEKLY_METRICS:
+                    series_map[metric].append(cached[metric])
+        return labels, series_map
+
+    def _build_monthly_series(row: pd.Series) -> tuple[list[str], dict[str, list[float]]]:
+        month_data = {label: {metric: np.nan for metric in FG_MONTHLY_METRIC_CODES} for label in FG_MONTH_LABELS}
+        for column in row.index:
+            col_name = str(column).strip()
+            bp_match = FG_BP_COLUMN_PATTERN.match(col_name)
+            if bp_match:
+                month_label = f"{bp_match.group('month').title()}{bp_match.group('year')}"
+                if month_label not in FG_MONTH_LABELS:
+                    continue
+                metric_key = "BP_PRV" if (bp_match.group("prefix") or "").strip().lower().startswith("prv") else "BP_CUR"
+                numeric_value = pd.to_numeric(row[column], errors="coerce")
+                if pd.isna(numeric_value):
+                    continue
+                entry = month_data[month_label]
+                entry[metric_key] = numeric_value if pd.isna(entry[metric_key]) else entry[metric_key] + numeric_value
+                continue
+            as_match = FG_AS_COLUMN_PATTERN.match(col_name)
+            if as_match:
+                month_label = f"{as_match.group('month').title()}{as_match.group('year')}"
+                if month_label not in FG_MONTH_LABELS:
+                    continue
+                numeric_value = pd.to_numeric(row[column], errors="coerce")
+                if pd.isna(numeric_value):
+                    continue
+                entry = month_data[month_label]
+                entry["AS"] = numeric_value if pd.isna(entry["AS"]) else entry["AS"] + numeric_value
+        labels: list[str] = []
+        series_map = {metric: [] for metric in FG_MONTHLY_METRIC_CODES}
+        for month_label in FG_MONTH_LABELS:
+            values = month_data.get(month_label)
+            if not values:
+                continue
+            if all(pd.isna(values[metric]) for metric in FG_MONTHLY_METRIC_CODES):
+                continue
+            labels.append(month_label)
+            for metric in FG_MONTHLY_METRIC_CODES:
+                series_map[metric].append(values[metric])
+        return labels, series_map
+
+    def _filter_monthly_series(series_map: dict[str, list[float]]) -> tuple[dict[str, list[float]], list[str]]:
+        filtered: dict[str, list[float]] = {}
+        order: list[str] = []
+        for metric in FG_MONTHLY_METRIC_CODES:
+            values = series_map.get(metric, [])
+            if values and any(pd.notna(v) for v in values):
+                filtered[metric] = values
+                order.append(metric)
+        return filtered, order
+
+    def _calculate_dioh(df: pd.DataFrame, metric_column_map: dict[str, str | None]) -> float | None:
+        oh_col = metric_column_map.get("Oh")
+        demand_col = metric_column_map.get("CurAS")
+        if not oh_col or not demand_col:
+            return None
+        if oh_col not in df.columns or demand_col not in df.columns:
+            return None
+
+        total_oh = pd.to_numeric(df[oh_col], errors="coerce").sum()
+        total_demand = pd.to_numeric(df[demand_col], errors="coerce").sum()
+        if total_oh <= 0 or total_demand <= 0:
+            return None
+
+        today = datetime.today()
+        first_day = today.replace(day=1)
+        next_month = first_day + relativedelta(months=1)
+        days_in_month = (next_month - first_day).days or 30
+        average_daily_demand = total_demand / days_in_month if days_in_month else None
+        if not average_daily_demand or average_daily_demand <= 0:
+            return None
+        return total_oh / average_daily_demand
+
+    def _build_group_series(
+        df: pd.DataFrame,
+        group_col: str | None,
+        metric_column_map: dict[str, str | None],
+    ) -> tuple[list[str], dict[str, list[float]]]:
+        if not group_col or group_col not in df.columns:
+            return [], {metric: [] for metric in FG_METRIC_ORDER}
+
+        labels: list[str] = []
+        series_map: dict[str, list[float]] = {metric: [] for metric in FG_METRIC_ORDER}
+        grouped = df.groupby(group_col, dropna=False)
+        for group_value, group_df in grouped:
+            label = str(group_value) if pd.notna(group_value) and str(group_value).strip() else "Unspecified"
+            labels.append(label)
+            for metric in FG_METRIC_ORDER:
+                column_name = metric_column_map.get(metric)
+                if column_name and column_name in group_df.columns:
+                    total_value = pd.to_numeric(group_df[column_name], errors="coerce").fillna(0).sum()
+                else:
+                    total_value = 0.0
+                series_map[metric].append(total_value)
+        return labels, series_map
+
+    def _compute_kpis(
+        df: pd.DataFrame,
+        metric_column_map: dict[str, str | None],
+        item_col: str | None,
+        name_col: str | None,
+        factory_col: str | None,
+        family_col: str | None,
+        market_col: str | None,
+    ) -> dict[str, tuple[int, pd.DataFrame]]:
+        base_index = df.index
+        empty_bool = pd.Series(False, index=base_index)
+
+        planning_col = _find_column(df.columns, ["Planning", "PlanningType", "PlanType"])
+        if planning_col and planning_col in df.columns:
+            planning_series = df[planning_col].astype(str).str.upper().str.strip()
+        else:
+            planning_series = pd.Series("", index=base_index)
+
+        curst_col = metric_column_map.get("CurST")
+        if curst_col and curst_col in df.columns:
+            numeric_curst = pd.to_numeric(df[curst_col], errors="coerce").fillna(0)
+        else:
+            numeric_curst = pd.Series(0, index=base_index, dtype=float)
+
+        oh_col = metric_column_map.get("Oh")
+        if oh_col and oh_col in df.columns:
+            numeric_oh = pd.to_numeric(df[oh_col], errors="coerce").fillna(0)
+        else:
+            numeric_oh = pd.Series(0, index=base_index, dtype=float)
+
+        ssqty_col = _find_column(df.columns, ["SSQty", "SafetyStockQty", "SS Qty"])
+        if ssqty_col and ssqty_col in df.columns:
+            numeric_ssqty = pd.to_numeric(df[ssqty_col], errors="coerce").fillna(0)
+        else:
+            numeric_ssqty = pd.Series(0, index=base_index, dtype=float)
+
+        detail_columns: list[str] = []
+        for candidate in [item_col, name_col, planning_col, factory_col, family_col, market_col, curst_col, ssqty_col, oh_col]:
+            if candidate and candidate in df.columns and candidate not in detail_columns:
+                detail_columns.append(candidate)
+
+        def _detail(mask: pd.Series | None) -> tuple[int, pd.DataFrame]:
+            if mask is None or mask.empty:
+                return 0, pd.DataFrame(columns=detail_columns)
+            prepared_mask = mask.reindex(base_index, fill_value=False)
+            count = int(prepared_mask.sum())
+            if not detail_columns:
+                return count, df.loc[prepared_mask].copy()
+            return count, df.loc[prepared_mask, detail_columns].copy()
+
+        mts_mask = planning_series.eq("MTS") if not planning_series.empty else empty_bool
+        mto_mask = planning_series.eq("MTO") if not planning_series.empty else empty_bool
+
+        oh_lt_ss_mask = empty_bool
+        if ssqty_col:
+            oh_lt_ss_mask = (numeric_oh < numeric_ssqty) & (numeric_ssqty > 0)
+
+        curst_gt0_oh0_mask = (numeric_curst > 0) & (numeric_oh == 0)
+
+        return {
+            "MTS": _detail(mts_mask.fillna(False)),
+            "MTO": _detail(mto_mask.fillna(False)),
+            "OH_lt_SSQty": _detail(oh_lt_ss_mask.fillna(False)),
+            "CurST_gt0_OH0": _detail(curst_gt0_oh0_mask.fillna(False)),
+        }
+
+    def _render_stacked_bar(labels: list[str], series_map: dict[str, list[float]], title: str, order: list[str]) -> None:
+        fig = go.Figure()
+        for metric in order:
+            values = series_map.get(metric, [])
+            if not values or all(pd.isna(values)):
+                continue
+            fig.add_trace(
+                go.Bar(
+                    x=labels,
+                    y=values,
+                    name=FG_METRIC_LABELS.get(metric, metric),
+                    marker={"color": FG_METRIC_COLOR_MAP.get(metric)},
+                )
+            )
+        if not fig.data:
+            st.info("No data available for the selected view.")
+            return
+        fig.update_layout(title=title, barmode="stack", height=420, hovermode="x unified")
+        st.plotly_chart(fig, use_container_width=True)
+
+    def _render_line_chart(labels: list[str], series_map: dict[str, list[float]], title: str, order: list[str]) -> None:
+        fig = go.Figure()
+        for metric in order:
+            values = series_map.get(metric, [])
+            if not values or all(pd.isna(values)):
+                continue
+            color = FG_METRIC_COLOR_MAP.get(metric)
+            fig.add_trace(
+                go.Scatter(
+                    x=labels,
+                    y=values,
+                    name=FG_MONTHLY_METRIC_LABELS.get(metric, metric),
+                    mode="lines+markers",
+                    line={"color": color} if color else None,
+                )
+            )
+        if not fig.data:
+            st.info("No data available for the selected view.")
+            return
+        fig.update_layout(title=title, height=420, hovermode="x unified")
+        st.plotly_chart(fig, use_container_width=True)
+
+    uploaded_file = st.file_uploader("Upload alternative FG XLSB file", type=["xlsb"])
+    fg_bytes = uploaded_file.getvalue() if uploaded_file else None
+    try:
+        with st.spinner("Loading FG data..."):
+            fg_df = load_fg_dataset(fg_bytes)
+    except FileNotFoundError:
+        st.error("Default FG workbook not found. Upload another file.")
+        return
+    except Exception as exc:
+        st.error(f"Unable to read FG workbook: {exc}")
+        return
+
+    if fg_df.empty:
+        st.warning("FG workbook is empty or missing expected sheets.")
+        return
+
+    factory_col = _find_column(fg_df.columns, ["Factory"])
+    item_col = _find_column(fg_df.columns, ["ItemNumber"])
+    name_col = _find_column(fg_df.columns, ["ItemName"])
+    family_col = _find_column(fg_df.columns, ["Family", "SubFamily", "SubFamilyName"])
+    oh_col = _find_column(fg_df.columns, ["CurSOH", "CurOH", "SOH", "CurStockOnHand", "StockOnHand", "OH"])
+    market_col = _find_column(fg_df.columns, ["Market", "LocExp", "LOCEXP", "Channel"])
+    if market_col is None:
+        market_col = "_Market"
+        fg_df[market_col] = "All"
+
+    metric_column_map = {
+        metric: _find_column(fg_df.columns, candidates)
+        for metric, candidates in FG_METRIC_CANDIDATES.items()
+    }
+
+    numeric_cols = fg_df.select_dtypes(include=[np.number]).columns
+    fg_df[numeric_cols] = fg_df[numeric_cols].fillna(0)
+
+    if factory_col:
+        fg_df = fg_df[
+            fg_df[factory_col].astype(str).str.strip().ne("") & fg_df[factory_col].notna()
+        ]
+    if family_col:
+        fg_df = fg_df[
+            fg_df[family_col].astype(str).str.strip().ne("") & fg_df[family_col].notna()
+        ]
+
+    st.markdown("### Filters")
+    filtered_stage = fg_df.copy()
+    row_one = st.columns(3)
+    row_two = st.columns(3)
+
+    with row_one[0]:
+        storage_col = _find_column(fg_df.columns, ["StorageType", "Storage", "Storage Type"])
+        storage_options = ["All"] + _unique_sorted_values(filtered_stage, storage_col)
+        storage_choice = st.selectbox("Storage type", storage_options, index=0)
+        if storage_col and storage_choice != "All":
+            filtered_stage = filtered_stage[filtered_stage[storage_col].astype(str).str.strip().eq(storage_choice)]
+
+    with row_one[1]:
+        raw_col = _find_column(fg_df.columns, ["RawType", "Raw"])
+        raw_options = ["All"] + _unique_sorted_values(filtered_stage, raw_col)
+        raw_choice = st.selectbox("Raw type", raw_options, index=0)
+        if raw_col and raw_choice != "All":
+            filtered_stage = filtered_stage[filtered_stage[raw_col].astype(str).str.strip().eq(raw_choice)]
+
+    with row_one[2]:
+        market_options = ["All"] + _unique_sorted_values(filtered_stage, market_col)
+        market_choice = st.selectbox("Market", market_options, index=0)
+        if market_choice != "All":
+            filtered_stage = filtered_stage[filtered_stage[market_col].astype(str).str.strip().eq(market_choice)]
+
+    with row_two[0]:
+        factory_options = ["All"] + _unique_sorted_values(filtered_stage, factory_col)
+        factory_choice = st.selectbox("Factory", factory_options, index=0)
+        if factory_choice != "All":
+            filtered_stage = filtered_stage[filtered_stage[factory_col].astype(str).str.strip().eq(factory_choice)]
+
+    with row_two[1]:
+        family_options = ["All"] + _unique_sorted_values(filtered_stage, family_col)
+        family_choice = st.selectbox("Family", family_options, index=0)
+        if family_choice != "All" and family_col:
+            filtered_stage = filtered_stage[filtered_stage[family_col].astype(str).str.strip().eq(family_choice)]
+
+    with row_two[2]:
+        item_options = ["All"]
+        item_display_to_value: dict[str, str] = {}
+        if item_col and item_col in filtered_stage.columns:
+            if name_col and name_col in filtered_stage.columns:
+                item_subset = (
+                    filtered_stage[[item_col, name_col]]
+                    .dropna()
+                    .drop_duplicates()
+                    .assign(display=lambda df: df[item_col].astype(str).str.zfill(6) + " - " + df[name_col].astype(str))
+                )
+                displays = sorted(item_subset["display"].tolist())
+                item_options += displays
+                item_display_to_value = dict(zip(item_subset["display"], item_subset[item_col].astype(str)))
+            else:
+                item_values = _unique_sorted_values(filtered_stage, item_col)
+                item_options += item_values
+                item_display_to_value = {value: value for value in item_values}
+        item_choice = st.selectbox("Items", item_options, index=0)
+        if item_choice != "All" and item_display_to_value:
+            target_item = item_display_to_value.get(item_choice)
+            if target_item is not None:
+                filtered_stage = filtered_stage[filtered_stage[item_col].astype(str).str.strip().eq(target_item)]
+
+    filtered_df = filtered_stage.copy()
+    if filtered_df.empty:
+        st.warning("No data matches the current filters.")
+        return
+
+    kpi_data = _compute_kpis(
+        filtered_df,
+        metric_column_map,
+        item_col,
+        name_col,
+        factory_col,
+        family_col,
+        market_col,
+    )
+    dioh_value = _calculate_dioh(filtered_df, metric_column_map)
+    st.caption("Click a KPI card's button to toggle its detailed list.")
+    kpi_cols = st.columns(5)
+    with kpi_cols[0]:
+        st.metric("DIOH", f"{dioh_value:,.1f} days" if dioh_value is not None else "—")
+
+    kpi_labels = [
+        ("MTS SKUs", "MTS"),
+        ("MTO SKUs", "MTO"),
+        ("< SSQty", "OH_lt_SSQty"),
+        ("OOS (CurST>0, OH=0)", "CurST_gt0_OH0"),
+    ]
+    for col, (label, key) in zip(kpi_cols[1:], kpi_labels):
+        with col:
+            count_value, _ = kpi_data.get(key, (0, pd.DataFrame()))
+            st.metric(label, f"{count_value:,}")
+            if st.button("View details", key=f"fg_kpi_btn_{key}"):
+                st.session_state[f"fg_show_{key}"] = not st.session_state.get(f"fg_show_{key}", False)
+
+    for label, key in kpi_labels:
+        if st.session_state.get(f"fg_show_{key}"):
+            _, detail_df = kpi_data.get(key, (0, pd.DataFrame()))
+            st.markdown(f"#### {label} details")
+            if detail_df.empty:
+                st.info("No matching items for this KPI.")
+            else:
+                st.dataframe(detail_df, use_container_width=True)
+
+    aggregated_row = filtered_df.sum(numeric_only=True)
+    labels_by_market, series_by_market = _build_group_series(filtered_df, market_col, metric_column_map)
+    _render_stacked_bar(labels_by_market, series_by_market, "Market totals (Cur metrics stack)", FG_METRIC_ORDER)
+
+    weekly_labels, weekly_series = _build_weekly_series(aggregated_row)
+    _render_stacked_bar(weekly_labels, weekly_series, "Cur month weekly breakdown", FG_WEEKLY_METRICS)
+
+    monthly_labels, monthly_series = _build_monthly_series(aggregated_row)
+    monthly_filtered_series, monthly_order = _filter_monthly_series(monthly_series)
+    _render_line_chart(monthly_labels, monthly_filtered_series, "Monthly trajectory", monthly_order)
+
+    dc_columns = [
+        col
+        for col in filtered_df.columns
+        if _normalize_name(col).startswith("dc") or _normalize_name(col).endswith("dc")
+    ]
+    if dc_columns:
+        dc_totals = filtered_df[dc_columns].apply(pd.to_numeric, errors="coerce").sum()
+        dc_totals = dc_totals[dc_totals > 0]
+        if not dc_totals.empty:
+            st.markdown("## 🗺️ Stock by DC")
+            records: list[dict[str, float | str]] = []
+            for column, value in dc_totals.items():
+                display_name = str(column).strip()
+                normalized = _normalize_name(display_name)
+                coords = None
+                for key, loc in FG_DC_LOCATION_MAP.items():
+                    key_norm = _normalize_name(key)
+                    if key_norm == normalized or key_norm in normalized or key in display_name:
+                        coords = loc
+                        break
+                if coords is None:
+                    continue
+                records.append({
+                    "Location": display_name,
+                    "Stock": float(value),
+                    "lat": coords["lat"],
+                    "lon": coords["lon"],
+                })
+            if records:
+                dc_df = pd.DataFrame(records)
+                options = ["All"] + sorted(dc_df["Location"].unique())
+                choice = st.selectbox("Select DC location", options=options, index=0, key="fg_dc_location")
+                display_df = dc_df if choice == "All" else dc_df[dc_df["Location"].eq(choice)]
+                if not display_df.empty:
+                    fig_map = go.Figure(
+                        go.Scattergeo(
+                            lon=display_df["lon"],
+                            lat=display_df["lat"],
+                            text=[f"{row.Location}<br>Stock: {row.Stock:,.0f}" for row in display_df.itertuples()],
+                            mode="markers",
+                            marker=dict(
+                                size=np.clip(display_df["Stock"] / display_df["Stock"].max() * 40, 6, 40),
+                                color=display_df["Stock"],
+                                colorscale="Oranges",
+                                colorbar=dict(title="Stock"),
+                                sizemode="diameter",
+                            ),
+                        )
+                    )
+                    fig_map.update_layout(
+                        title="DC Stock Distribution",
+                        geo=dict(
+                            scope="africa",
+                            projection=dict(type="mercator"),
+                            center=dict(lat=27.0, lon=31.0),
+                            lonaxis=dict(range=[24, 34]),
+                            lataxis=dict(range=[22, 32]),
+                            showland=True,
+                            landcolor="#f0f0f0",
+                            showcountries=True,
+                            countrycolor="#999999",
+                        ),
+                        margin=dict(l=0, r=0, t=40, b=0),
+                    )
+                    st.plotly_chart(fig_map, use_container_width=True)
+                    st.dataframe(
+                        display_df[["Location", "Stock"]].sort_values("Stock", ascending=False).style.format({"Stock": "{:,.0f}"}),
+                        use_container_width=True,
+                    )
+                    st.caption("Quick branch view:")
+                    st.map(
+                        display_df.rename(columns={"lat": "Latitude", "lon": "Longitude"}),
+                        latitude="Latitude",
+                        longitude="Longitude",
+                        zoom=6,
+                        size=100,
+                    )
+
+
 st.set_page_config(page_title="Inventory Simulator", layout="wide")
 
 # ===========================
@@ -108,6 +787,18 @@ if calc_help_file:
     st.sidebar.success(f"Using CalcHelp from: {calc_help_file.name}")
 else:
     st.sidebar.caption("Using CalcHelp bundled with the active materials workbook.")
+
+st.sidebar.markdown("---")
+app_view = st.sidebar.radio(
+    "📑 Select view",
+    ("Inventory Simulator", "FG Explorer"),
+    index=0,
+    key="main_app_view",
+)
+
+if app_view == "FG Explorer":
+    render_fg_explorer()
+    st.stop()
 
 # ===========================
 # Utility Helpers
@@ -854,6 +1545,7 @@ def render_inventory_dashboard():
     # 5. Dashboard
     # ===========================
     st.title("📦 Inventory Simulator")
+    st.subheader("Turn Planning Up")
     st.markdown(f"**Date:** {today.strftime('%d %B %Y')}")
 
     # استخدام الفاصلة للألوف في الأرقام
