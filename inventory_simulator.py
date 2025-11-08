@@ -11,6 +11,9 @@ import re
 FG_DEFAULT_FG_PATH = Path(
     r"C:\Users\ashalaby\OneDrive - Halwani Bros\Planning - Sources\new view 2023\FP module 23.xlsb"
 )
+BOM_DEFAULT_PATH = Path(
+    r"C:\Users\ashalaby\OneDrive - Halwani Bros\Planning - Sources\RECIPE(ver. Dec 2018).XLSX"
+)
 FG_PRIMARY_SHEETS = ("Data", "Data2")
 FG_TEXT_COLUMNS = {
     "itemnumber",
@@ -186,7 +189,10 @@ def render_accent_subheader(text: str) -> None:
     st.markdown(
         f"""
         <h3 style='
-            color: #d35400;
+            font-size: 1.25rem;
+            color: #5e4ae3;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
             font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
             font-weight: 600;
             margin-top: 0.5rem;
@@ -197,10 +203,346 @@ def render_accent_subheader(text: str) -> None:
     )
 
 
-def render_fg_explorer() -> None:
-    st.title("🏷️ FG Explorer")
-    render_accent_subheader("Turn ThePlanning Up")
-    st.caption("Analyze finished goods by cascading filters and KPIs.")
+def _ensure_page_banner_styles() -> None:
+    if st.session_state.get("_hero_banner_css_injected"):
+        return
+    st.session_state["_hero_banner_css_injected"] = True
+    st.markdown(
+        """
+        <style>
+            @keyframes heroGradientShift {
+                0% { transform: rotate(0deg) scale(1); }
+                50% { transform: rotate(1.5deg) scale(1.05); }
+                100% { transform: rotate(0deg) scale(1); }
+            }
+
+            @keyframes heroIconFloat {
+                0%, 100% { transform: translateY(0); }
+                50% { transform: translateY(-6px); }
+            }
+
+            .hero-banner {
+                position: relative;
+                overflow: hidden;
+                border-radius: 20px;
+                padding: 2.5rem clamp(1.5rem, 4vw, 3rem);
+                margin-bottom: 1.75rem;
+                color: #ffffff;
+                background: var(
+                    --hero-gradient,
+                    linear-gradient(120deg, #8e2de2 0%, #4a00e0 50%, #00c6ff 100%)
+                );
+                box-shadow: 0 18px 45px rgba(20, 20, 43, 0.25);
+                border: 1px solid rgba(255, 255, 255, 0.25);
+            }
+
+            .hero-banner::before {
+                content: "";
+                position: absolute;
+                inset: -60% -30% -40% -30%;
+                background: radial-gradient(circle at center, rgba(255, 255, 255, 0.25), transparent 70%);
+                animation: heroGradientShift 16s ease-in-out infinite;
+                opacity: 0.7;
+            }
+
+            .hero-banner__content {
+                position: relative;
+                z-index: 1;
+                display: flex;
+                flex-direction: column;
+                gap: 0.75rem;
+            }
+
+            .hero-banner__title {
+                display: flex;
+                align-items: center;
+                gap: 0.75rem;
+                font-size: clamp(1.6rem, 2.4vw, 2.4rem);
+                font-weight: 700;
+                letter-spacing: 0.02em;
+            }
+
+            .hero-banner__icon {
+                font-size: clamp(1.9rem, 3vw, 2.6rem);
+                animation: heroIconFloat 4.5s ease-in-out infinite;
+                filter: drop-shadow(0 6px 8px rgba(0, 0, 0, 0.25));
+            }
+
+            .hero-banner__subtitle {
+                font-size: clamp(0.95rem, 1.5vw, 1.1rem);
+                font-weight: 500;
+                opacity: 0.85;
+            }
+
+            .hero-banner__meta {
+                display: inline-flex;
+                gap: 0.65rem;
+                align-items: center;
+                padding: 0.55rem 1.2rem;
+                border-radius: 999px;
+                background: rgba(255, 255, 255, 0.18);
+                border: 1px solid rgba(255, 255, 255, 0.3);
+                backdrop-filter: blur(8px);
+                font-size: 0.9rem;
+            }
+
+            @media (max-width: 640px) {
+                .hero-banner {
+                    padding: 2rem 1.5rem;
+                }
+            }
+
+            [data-testid="stSidebar"] > div:first-child {
+                background: linear-gradient(180deg, #f7f7f7 0%, #e2e2e2 100%);
+                color: #1f1f1f;
+                padding: 1.5rem 1rem 2rem;
+                border-right: 1px solid rgba(0, 0, 0, 0.08);
+                box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.3);
+            }
+
+            [data-testid="stSidebar"] > div:first-child * {
+                color: inherit !important;
+            }
+
+            [data-testid="stSidebar"] [data-testid="stMarkdown"] a {
+                color: #3949ab !important;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_hero_banner(
+    title: str,
+    subtitle: str | None = None,
+    *,
+    icon: str | None = None,
+    meta: str | None = None,
+    gradient: str | None = None,
+) -> None:
+    _ensure_page_banner_styles()
+    gradient_style = f" style=\"--hero-gradient: {gradient}\"" if gradient else ""
+    icon_html = f"<span class='hero-banner__icon'>{icon}</span>" if icon else ""
+    subtitle_html = (
+        f"<p class='hero-banner__subtitle'>{subtitle}</p>" if subtitle else ""
+    )
+    meta_html = (
+        f"<span class='hero-banner__meta'>{meta}</span>" if meta else ""
+    )
+    st.markdown(
+        f"""
+        <div class='hero-banner'{gradient_style}>
+            <div class='hero-banner__content'>
+                <div class='hero-banner__title'>
+                    {icon_html}
+                    <span>{title}</span>
+                </div>
+                {subtitle_html}
+                {meta_html}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _canonical_item_code(value: str | int | float | None) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        stripped = text.lstrip("0")
+        return stripped or "0"
+    return text
+
+
+def _get_factory_icon(factory_name: str) -> str:
+    """Return an icon for a factory based on its name."""
+    if not factory_name or factory_name == "All":
+        return "🏭"
+    factory_lower = str(factory_name).strip().lower()
+    if "wip" in factory_lower:
+        return "⚙️"
+    elif "meat" in factory_lower or "لحم" in factory_lower:
+        return "🥩"
+    elif "chicken" in factory_lower or "دجاج" in factory_lower or "poultry" in factory_lower:
+        return "🍗"
+    elif "halawa" in factory_lower or "حلاوة" in factory_lower or "halva" in factory_lower:
+        return "🌰"
+    elif "tahina" in factory_lower or "طحينة" in factory_lower or "tahini" in factory_lower or "tehena" in factory_lower:
+        return "🌰"
+    elif "jam" in factory_lower or "مربى" in factory_lower:
+        return "🍓"
+    elif "juice" in factory_lower or "عصير" in factory_lower:
+        return "🧃"
+    elif "tost" in factory_lower or "toast" in factory_lower or "توست" in factory_lower or "bread" in factory_lower or "خبز" in factory_lower:
+        return "🍞"
+    elif "fruit" in factory_lower or "فواكه" in factory_lower:
+        return "🍎"
+    elif "jeddah" in factory_lower or "جدة" in factory_lower:
+        return "🏭"
+    elif "riyadh" in factory_lower or "رياض" in factory_lower:
+        return "🏢"
+    elif "dammam" in factory_lower or "دمام" in factory_lower:
+        return "🏗️"
+    elif "cairo" in factory_lower or "قاهرة" in factory_lower:
+        return "🏛️"
+    elif "alex" in factory_lower or "اسكندرية" in factory_lower:
+        return "⚓"
+    elif "unspecified" in factory_lower or "unknown" in factory_lower:
+        return "❓"
+    else:
+        return "🏭"
+
+
+def _get_family_icon(family_name: str) -> str:
+    """Return an icon for a product family based on its name."""
+    if not family_name or family_name == "All":
+        return "📦"
+    family_lower = str(family_name).strip().lower()
+    # Meat products
+    if "beef" in family_lower or "لحم بقري" in family_lower or "burger" in family_lower or "برجر" in family_lower:
+        return "🥩"
+    elif "sausage" in family_lower or "سجق" in family_lower or "hotdog" in family_lower:
+        return "🌭"
+    elif "mortadella" in family_lower or "مرتديلا" in family_lower:
+        return "🥓"
+    # Chicken products
+    elif "chicken" in family_lower or "دجاج" in family_lower or "nugget" in family_lower or "ناجتس" in family_lower:
+        return "🍗"
+    # Sesame products
+    elif "halawa" in family_lower or "حلاوة" in family_lower or "halva" in family_lower:
+        return "🌰"
+    elif "tahina" in family_lower or "طحينة" in family_lower or "tahini" in family_lower:
+        return "🌰"
+    # Spreads and preserves
+    elif "jam" in family_lower or "مربى" in family_lower or "marmalade" in family_lower:
+        return "🍓"
+    elif "honey" in family_lower or "عسل" in family_lower:
+        return "🍯"
+    elif "chocolate" in family_lower or "شوكولاتة" in family_lower or "nutella" in family_lower:
+        return "🍫"
+    # Beverages
+    elif "juice" in family_lower or "عصير" in family_lower:
+        return "🧃"
+    elif "drink" in family_lower or "مشروب" in family_lower or "beverage" in family_lower:
+        return "🥤"
+    # Bakery
+    elif "bread" in family_lower or "خبز" in family_lower or "toast" in family_lower or "توست" in family_lower:
+        return "🍞"
+    elif "cake" in family_lower or "كيك" in family_lower or "pastry" in family_lower:
+        return "🎂"
+    # Dairy
+    elif "cheese" in family_lower or "جبن" in family_lower:
+        return "🧀"
+    elif "butter" in family_lower or "زبدة" in family_lower:
+        return "🧈"
+    # Vegetables and fruits
+    elif "vegetable" in family_lower or "خضار" in family_lower:
+        return "🥬"
+    elif "fruit" in family_lower or "فواكه" in family_lower:
+        return "🍎"
+    # Snacks
+    elif "snack" in family_lower or "سناك" in family_lower or "chip" in family_lower:
+        return "🍿"
+    # Packaging
+    elif "packaging" in family_lower or "تغليف" in family_lower or "package" in family_lower:
+        return "📦"
+    else:
+        return "📦"
+
+
+def _get_rawtype_icon(raw_type: str) -> str:
+    """Return an icon for raw material type based on its name."""
+    if not raw_type or raw_type == "All":
+        return "🧱"
+    raw_lower = str(raw_type).strip().lower()
+    # Meat and poultry
+    if "meat" in raw_lower or "لحم" in raw_lower or "beef" in raw_lower:
+        return "🥩"
+    elif "chicken" in raw_lower or "دجاج" in raw_lower or "poultry" in raw_lower:
+        return "🍗"
+    # Grains and seeds
+    elif "sesame" in raw_lower or "سمسم" in raw_lower:
+        return "🌰"
+    elif "wheat" in raw_lower or "قمح" in raw_lower or "flour" in raw_lower or "دقيق" in raw_lower:
+        return "🌾"
+    elif "grain" in raw_lower or "حبوب" in raw_lower or "cereal" in raw_lower:
+        return "🌾"
+    # Fruits and vegetables
+    elif "fruit" in raw_lower or "فواكه" in raw_lower or "strawberry" in raw_lower or "orange" in raw_lower:
+        return "🍎"
+    elif "vegetable" in raw_lower or "خضار" in raw_lower or "tomato" in raw_lower:
+        return "🥬"
+    # Dairy
+    elif "milk" in raw_lower or "حليب" in raw_lower or "dairy" in raw_lower:
+        return "🥛"
+    elif "cheese" in raw_lower or "جبن" in raw_lower:
+        return "🧀"
+    elif "butter" in raw_lower or "زبدة" in raw_lower or "cream" in raw_lower:
+        return "🧈"
+    # Sweeteners
+    elif "sugar" in raw_lower or "سكر" in raw_lower:
+        return "🍬"
+    elif "honey" in raw_lower or "عسل" in raw_lower:
+        return "🍯"
+    # Oils and fats
+    elif "oil" in raw_lower or "زيت" in raw_lower or "fat" in raw_lower:
+        return "🫠"
+    # Spices and seasonings
+    elif "spice" in raw_lower or "توابل" in raw_lower or "salt" in raw_lower or "ملح" in raw_lower:
+        return "🧂"
+    # Packaging materials
+    elif "packaging" in raw_lower or "تغليف" in raw_lower or "carton" in raw_lower or "plastic" in raw_lower or "can" in raw_lower:
+        return "📦"
+    elif "bottle" in raw_lower or "زجاجة" in raw_lower or "jar" in raw_lower:
+        return "🍾"
+    # Chemicals and additives
+    elif "chemical" in raw_lower or "كيميائي" in raw_lower or "additive" in raw_lower:
+        return "⚗️"
+    else:
+        return "🧱"
+
+
+@st.cache_data(show_spinner=False)
+def load_bom_workbook(file_bytes: bytes | None = None, *, allow_default: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if file_bytes:
+        source = io.BytesIO(file_bytes)
+    elif allow_default:
+        if not BOM_DEFAULT_PATH.exists():
+            raise FileNotFoundError(
+                "Default BOM workbook not found. Please upload a BOM workbook."
+            )
+        source = BOM_DEFAULT_PATH
+    else:
+        raise FileNotFoundError("BOM workbook not provided.")
+
+    sheets = pd.read_excel(source, sheet_name=["Bom Data", "Recipe Data"], dtype=str)
+    bom_df = sheets.get("Bom Data", pd.DataFrame())
+    recipe_df = sheets.get("Recipe Data", pd.DataFrame())
+
+    for frame in (bom_df, recipe_df):
+        if frame is None or frame.empty:
+            continue
+        frame.columns = [str(col).strip() for col in frame.columns]
+        for enforce_col in ("BomVersion_ItemId", "ItemId"):
+            if enforce_col in frame.columns:
+                frame[enforce_col] = frame[enforce_col].astype(str).str.strip()
+
+    return bom_df, recipe_df
+
+
+def render_fg_explorer(materials_df: pd.DataFrame | None = None) -> None:
+    render_hero_banner(
+        title="FG Explorer",
+        subtitle="Analyze finished goods by cascading filters and KPIs.",
+        icon="🏷️",
+        meta="Turn The Planning Up ⬆️💡⬆️",
+        gradient="linear-gradient(120deg, #ff7eb3 0%, #ff758c 50%, #ffae70 100%)",
+    )
 
     def _normalize_name(name: str | int) -> str:
         return str(name).strip().lower().replace(" ", "").replace("-", "").replace("_", "")
@@ -524,7 +866,9 @@ def render_fg_explorer() -> None:
     with row_one[1]:
         raw_col = _find_column(fg_df.columns, ["RawType", "Raw"])
         raw_options = ["All"] + _unique_sorted_values(filtered_stage, raw_col)
-        raw_choice = st.selectbox("Raw type", raw_options, index=0)
+        raw_display_options = [f"{_get_rawtype_icon(r)} {r}" for r in raw_options]
+        raw_choice_display = st.selectbox("Raw type", raw_display_options, index=0)
+        raw_choice = raw_options[raw_display_options.index(raw_choice_display)]
         if raw_col and raw_choice != "All":
             filtered_stage = filtered_stage[filtered_stage[raw_col].astype(str).str.strip().eq(raw_choice)]
 
@@ -535,14 +879,26 @@ def render_fg_explorer() -> None:
             filtered_stage = filtered_stage[filtered_stage[market_col].astype(str).str.strip().eq(market_choice)]
 
     with row_two[0]:
+        # Add CSS for larger icons in selectbox
+        st.markdown("""
+            <style>
+            div[data-baseweb="select"] span {
+                font-size: 1.2em !important;
+            }
+            </style>
+        """, unsafe_allow_html=True)
         factory_options = ["All"] + _unique_sorted_values(filtered_stage, factory_col)
-        factory_choice = st.selectbox("Factory", factory_options, index=0)
+        factory_display_options = [f"{_get_factory_icon(f)} {f}" for f in factory_options]
+        factory_choice_display = st.selectbox("Factory", factory_display_options, index=0)
+        factory_choice = factory_options[factory_display_options.index(factory_choice_display)]
         if factory_choice != "All":
             filtered_stage = filtered_stage[filtered_stage[factory_col].astype(str).str.strip().eq(factory_choice)]
 
     with row_two[1]:
         family_options = ["All"] + _unique_sorted_values(filtered_stage, family_col)
-        family_choice = st.selectbox("Family", family_options, index=0)
+        family_display_options = [f"{_get_family_icon(f)} {f}" for f in family_options]
+        family_choice_display = st.selectbox("Family", family_display_options, index=0)
+        family_choice = family_options[family_display_options.index(family_choice_display)]
         if family_choice != "All" and family_col:
             filtered_stage = filtered_stage[filtered_stage[family_col].astype(str).str.strip().eq(family_choice)]
 
@@ -591,10 +947,10 @@ def render_fg_explorer() -> None:
         st.metric("DIOH", f"{dioh_value:,.1f} days" if dioh_value is not None else "—")
 
     kpi_labels = [
-        ("MTS SKUs", "MTS"),
-        ("MTO SKUs", "MTO"),
-        ("< SSQty", "OH_lt_SSQty"),
-        ("OOS (CurST>0, OH=0)", "CurST_gt0_OH0"),
+        ("📦 MTS SKUs", "MTS"),
+        ("🔧 MTO SKUs", "MTO"),
+        ("⚠️ < SSQty", "OH_lt_SSQty"),
+        ("🚨 OOS (CurST>0, OH=0)", "CurST_gt0_OH0"),
     ]
     for col, (label, key) in zip(kpi_cols[1:], kpi_labels):
         with col:
@@ -603,9 +959,14 @@ def render_fg_explorer() -> None:
             if st.button("View details", key=f"fg_kpi_btn_{key}"):
                 st.session_state[f"fg_show_{key}"] = not st.session_state.get(f"fg_show_{key}", False)
 
+    # Collect all KPI detail dataframes for shortage analysis
+    all_kpi_fgs: list[pd.DataFrame] = []
     for label, key in kpi_labels:
+        _, detail_df = kpi_data.get(key, (0, pd.DataFrame()))
+        if not detail_df.empty:
+            all_kpi_fgs.append(detail_df)
+        
         if st.session_state.get(f"fg_show_{key}"):
-            _, detail_df = kpi_data.get(key, (0, pd.DataFrame()))
             st.markdown(f"#### {label} details")
             if detail_df.empty:
                 st.info("No matching items for this KPI.")
@@ -613,9 +974,6 @@ def render_fg_explorer() -> None:
                 st.dataframe(detail_df, use_container_width=True)
 
     aggregated_row = filtered_df.sum(numeric_only=True)
-    labels_by_market, series_by_market = _build_group_series(filtered_df, market_col, metric_column_map)
-    _render_stacked_bar(labels_by_market, series_by_market, "Market totals (Cur metrics stack)", FG_METRIC_ORDER)
-
     weekly_labels, weekly_series = _build_weekly_series(aggregated_row)
     _render_stacked_bar(weekly_labels, weekly_series, "Cur month weekly breakdown", FG_WEEKLY_METRICS)
 
@@ -701,6 +1059,973 @@ def render_fg_explorer() -> None:
                         size=100,
                     )
 
+    # Combine all KPI FGs for shortage analysis
+    combined_shortage_fgs = pd.DataFrame()
+    if all_kpi_fgs:
+        combined_shortage_fgs = pd.concat(all_kpi_fgs, ignore_index=True)
+        if item_col in combined_shortage_fgs.columns:
+            combined_shortage_fgs = combined_shortage_fgs.drop_duplicates(subset=[item_col])
+    
+    if not combined_shortage_fgs.empty:
+        st.markdown("### ⚠️ Materials with Insufficient OH")
+
+        bom_df = recipe_df = pd.DataFrame()
+        try:
+            bom_df, recipe_df = load_bom_workbook(None, allow_default=True)
+        except FileNotFoundError:
+            st.warning("Default BOM workbook not found. Upload the BOM in the BOM Calculator view to enable this insight.")
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Unable to load BOM workbook: {exc}")
+
+        if bom_df.empty:
+            st.info("BOM data unavailable; cannot evaluate component shortages.")
+        else:
+            item_code_col = item_col if item_col in combined_shortage_fgs.columns else None
+            item_name_col = name_col if name_col in combined_shortage_fgs.columns else None
+
+            materials_stock: dict[str, float] = {}
+            if materials_df is not None and not materials_df.empty:
+                stock_code_col = _find_column(
+                    materials_df.columns,
+                    ["ItemNumber", "Item Number", "Item", "Item No", "ItemCode", "Item Code"],
+                )
+                stock_qty_col = _find_column(
+                    materials_df.columns,
+                    ["OH", "CurOH", "StockOnHand", "SOH", "CurrentOH"],
+                )
+                factory_col = _find_column(
+                    materials_df.columns,
+                    ["Factory", "Plant", "Location"],
+                )
+                if stock_code_col and stock_qty_col:
+                    # Filter out WIP factory rows
+                    filtered_materials = materials_df.copy()
+                    if factory_col:
+                        filtered_materials = filtered_materials[
+                            ~filtered_materials[factory_col].astype(str).str.strip().str.upper().eq("WIP")
+                        ]
+                    
+                    stock_series = filtered_materials[[stock_code_col, stock_qty_col]].copy()
+                    stock_series[stock_code_col] = stock_series[stock_code_col].astype(str).str.strip()
+                    stock_series[stock_qty_col] = pd.to_numeric(
+                        stock_series[stock_qty_col], errors="coerce"
+                    ).fillna(0.0)
+                    materials_stock = {}
+                    for _, entry in stock_series.iterrows():
+                        raw_code = str(entry[stock_code_col]).strip()
+                        qty = float(entry[stock_qty_col])
+                        if not raw_code:
+                            continue
+                        canon_code = _canonical_item_code(raw_code)
+                        for key in {raw_code, canon_code}:
+                            if not key:
+                                continue
+                            existing = materials_stock.get(key)
+                            materials_stock[key] = qty if existing is None else max(existing, qty)
+
+            if not materials_stock:
+                st.info("Materials stock (ItemNumber & OH) not available; please ensure the main materials workbook is loaded.")
+            else:
+                shortage_rows: list[dict[str, float | str | bool]] = []
+                components_lookup: dict[str, pd.DataFrame] = {}
+                skipped_fgs: list[str] = []
+
+                def _resolve_demand(row: pd.Series) -> float:
+                    demand_keys = [
+                        "CurST",
+                        next((c for c in row.index if str(c).lower().endswith("curst")), None),
+                        "CurAPP",
+                        next((c for c in row.index if str(c).lower() in {"demand", "forecast"}), None),
+                    ]
+                    for key in demand_keys:
+                        if key and key in row.index:
+                            val = pd.to_numeric(row.get(key), errors="coerce")
+                            if pd.notna(val) and val > 0:
+                                return float(val)
+                    return 0.0
+
+                for _, fg_row in combined_shortage_fgs.iterrows():
+                    fg_code = str(fg_row.get(item_code_col, "")).strip() if item_code_col else ""
+                    if not fg_code:
+                        continue
+                    fg_name = str(fg_row.get(item_name_col, "")).strip() if item_name_col else fg_code
+                    demand_qty = _resolve_demand(fg_row)
+                    shortage_info = compute_fg_material_shortage(
+                        fg_code,
+                        demand_qty,
+                        bom_df,
+                        recipe_df,
+                        materials_stock,
+                    )
+                    if shortage_info is None:
+                        continue
+
+                    if not shortage_info.get("coverage_evaluated", True):
+                        skipped_fgs.append(fg_code)
+                        continue
+
+                    max_feasible_qty = shortage_info["max_feasible_qty"]
+                    shortfall_qty = shortage_info["shortfall_qty"]
+                    if not np.isfinite(max_feasible_qty):
+                        max_feasible_qty_display = "∞"
+                    else:
+                        max_feasible_qty_display = max(max_feasible_qty, 0.0)
+
+                    shortage_rows.append(
+                        {
+                            "FG Code": fg_code,
+                            "FG Name": fg_name,
+                            "Required Qty": shortage_info["required_qty"],
+                            "Max Feasible Qty": max_feasible_qty_display,
+                            "Shortfall Qty": shortfall_qty,
+                            "Shortage?": shortage_info["shortage_flag"],
+                            "Limiting Components": shortage_info["limiting_summary"],
+                        }
+                    )
+                    components_lookup[fg_code] = shortage_info["components_table"]
+
+                if not shortage_rows:
+                    st.info("✅ No material shortages detected for OOS finished goods.")
+                else:
+                    # Collect all shortage components across all FGs
+                    all_shortage_comps = []
+                    for fg_code in components_lookup:
+                        comp_df = components_lookup[fg_code]
+                        if "is_short" in comp_df.columns:
+                            shortage_comps = comp_df[comp_df["is_short"] == True].copy()
+                            if not shortage_comps.empty:
+                                shortage_comps["FG_Code"] = fg_code
+                                all_shortage_comps.append(shortage_comps)
+                    
+                    if all_shortage_comps:
+                        combined_shortages = pd.concat(all_shortage_comps, ignore_index=True)
+                        
+                        # Enrich with Note from materials_df
+                        if materials_df is not None and not materials_df.empty:
+                            note_col = _find_column(materials_df.columns, ["Note", "Notes", "Remarks", "Comment", "Comments"])
+                            if note_col:
+                                mat_notes = materials_df[[stock_code_col, note_col]].copy()
+                                mat_notes.columns = ["material_code", "note"]
+                                mat_notes["material_code"] = mat_notes["material_code"].astype(str).str.strip()
+                                mat_notes["note"] = mat_notes["note"].astype(str).fillna("")
+                                # Create lookup with canonical codes
+                                note_lookup = {}
+                                for _, row in mat_notes.iterrows():
+                                    raw = row["material_code"]
+                                    canon = _canonical_item_code(raw)
+                                    note_text = row["note"]
+                                    for key in {raw, canon}:
+                                        if key and note_text:
+                                            note_lookup[key] = note_text
+                                combined_shortages["note"] = combined_shortages["component_code"].apply(
+                                    lambda c: note_lookup.get(_canonical_item_code(str(c)), "")
+                                )
+                        
+                        shortage_display = combined_shortages[["FG_Code", "component_code", "component_name", "required_qty", "available_oh", "gap_qty"]].copy()
+                        if "note" in combined_shortages.columns:
+                            shortage_display["note"] = combined_shortages["note"]
+                        
+                        for col in ["required_qty", "available_oh", "gap_qty"]:
+                            if col in shortage_display.columns:
+                                shortage_display[col] = pd.to_numeric(shortage_display[col], errors="coerce")
+                        shortage_display["shortage_qty"] = -shortage_display["gap_qty"]
+                        shortage_display = shortage_display.drop(columns=["gap_qty"])
+                        
+                        rename_map = {
+                            "FG_Code": "FG Code",
+                            "component_code": "Material Code",
+                            "component_name": "Material Name",
+                            "required_qty": "Required",
+                            "available_oh": "Available OH",
+                            "shortage_qty": "Shortage"
+                        }
+                        if "note" in shortage_display.columns:
+                            rename_map["note"] = "Note"
+                        shortage_display = shortage_display.rename(columns=rename_map)
+                        
+                        styled = shortage_display.style.format({
+                            "Required": "{:,.2f}",
+                            "Available OH": "{:,.2f}",
+                            "Shortage": "{:,.2f}"
+                        })
+                        
+                        # Highlight Note column with yellow background
+                        if "Note" in shortage_display.columns:
+                            styled = styled.set_properties(
+                                subset=["Note"],
+                                **{"background-color": "#fff3cd", "color": "#856404", "white-space": "pre-wrap", "max-width": "300px"}
+                            )
+                        
+                        st.dataframe(
+                            styled,
+                            use_container_width=True,
+                        )
+                    else:
+                        st.info("✅ All materials have sufficient OH.")
+
+
+def _is_recipe_indicator(name: str) -> bool:
+    if not isinstance(name, str):
+        return False
+    normalized = name.strip().lower()
+    if not normalized:
+        return False
+    return any(token in normalized for token in ("طبخة", "recipe", "mix", "batch"))
+
+
+def _extract_fg_components(
+    fg_code: str,
+    bom_df: pd.DataFrame,
+    recipe_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, float]:
+    required_cols = {"BomVersion_ItemId", "ItemId", "ItemName", "BOMQty"}
+    if bom_df is None or bom_df.empty or not required_cols.issubset(bom_df.columns):
+        return pd.DataFrame(), np.nan
+
+    fg_code_norm = str(fg_code).strip()
+    if not fg_code_norm:
+        return pd.DataFrame(), np.nan
+
+    subset = bom_df[
+        bom_df["BomVersion_ItemId"].astype(str).str.strip() == fg_code_norm
+    ].copy()
+    if subset.empty:
+        return pd.DataFrame(), np.nan
+
+    subset["ItemName"] = subset["ItemName"].astype(str).fillna("")
+    recipe_mask = subset["ItemName"].apply(_is_recipe_indicator)
+    packaging_rows = subset[~recipe_mask]
+    recipe_rows = subset[recipe_mask]
+
+    base_recipe_qty = (
+        pd.to_numeric(recipe_rows["BOMQty"], errors="coerce").dropna().iloc[0]
+        if not recipe_rows.empty
+        else 1.0
+    )
+    if pd.isna(base_recipe_qty) or base_recipe_qty <= 0:
+        base_recipe_qty = 1.0
+
+    recipe_code = (
+        str(recipe_rows["ItemId"].iloc[0]).strip()
+        if not recipe_rows.empty
+        else None
+    )
+
+    components: list[dict[str, str | float]] = []
+    for _, row in packaging_rows.iterrows():
+        qty_value = pd.to_numeric(row.get("BOMQty", 0), errors="coerce")
+        qty = float(qty_value) if pd.notna(qty_value) else 0.0
+        if qty <= 0:
+            continue
+        components.append(
+            {
+                "component_code": str(row.get("ItemId", "")).strip(),
+                "component_name": str(row.get("ItemName", "")).strip(),
+                "component_type": "Packaging",
+                "unit": str(row.get("UnitId", "")).strip(),
+                "qty_per_batch": qty,
+            }
+        )
+
+    if recipe_code and recipe_df is not None and not recipe_df.empty:
+        if not {"BomVersion_ItemId", "ItemId", "ItemName", "BOMQty"}.issubset(recipe_df.columns):
+            recipe_subset = pd.DataFrame()
+        else:
+            recipe_subset = recipe_df[
+                recipe_df["BomVersion_ItemId"].astype(str).str.strip() == recipe_code
+            ].copy()
+        if not recipe_subset.empty:
+            for _, row in recipe_subset.iterrows():
+                qty_value = pd.to_numeric(row.get("BOMQty", 0), errors="coerce")
+                qty = float(qty_value) if pd.notna(qty_value) else 0.0
+                if qty <= 0:
+                    continue
+                components.append(
+                    {
+                        "component_code": str(row.get("ItemId", "")).strip(),
+                        "component_name": str(row.get("ItemName", "")).strip(),
+                        "component_type": "Raw",
+                        "unit": str(row.get("UnitId", "")).strip(),
+                        "qty_per_batch": qty,
+                    }
+                )
+
+    components_df = pd.DataFrame(components)
+    return components_df, float(base_recipe_qty)
+
+
+def compute_fg_material_shortage(
+    fg_code: str,
+    demand_qty: float,
+    bom_df: pd.DataFrame,
+    recipe_df: pd.DataFrame,
+    materials_stock: dict[str, float],
+) -> dict | None:
+    components_df, base_recipe_qty = _extract_fg_components(fg_code, bom_df, recipe_df)
+    if components_df.empty:
+        return None
+
+    base_recipe_qty = base_recipe_qty if base_recipe_qty and base_recipe_qty > 0 else 1.0
+    required_qty = float(demand_qty) if demand_qty and demand_qty > 0 else base_recipe_qty
+    num_batches = required_qty / base_recipe_qty if base_recipe_qty else 0.0
+
+    evaluated = components_df.copy()
+    evaluated["component_code"] = evaluated["component_code"].astype(str).str.strip()
+
+    evaluated["_match_code"] = evaluated["component_code"].apply(_canonical_item_code)
+
+    excluded_components: list[str] = []
+    if materials_stock:
+        known_codes = {str(code).strip() for code in materials_stock.keys()}
+        recognized_mask = evaluated["_match_code"].isin(known_codes)
+        if not recognized_mask.all():
+            excluded_components = (
+                evaluated.loc[~recognized_mask, "component_code"].dropna().unique().tolist()
+            )
+            evaluated = evaluated.loc[recognized_mask].copy()
+    else:
+        recognized_mask = pd.Series(True, index=evaluated.index)
+
+    coverage_evaluated = not evaluated.empty
+    if not coverage_evaluated:
+        return {
+            "required_qty": required_qty,
+            "max_feasible_qty": float("inf"),
+            "shortfall_qty": 0.0,
+            "shortage_flag": False,
+            "limiting_summary": "",
+            "components_table": pd.DataFrame(),
+            "excluded_components": excluded_components,
+            "coverage_evaluated": False,
+        }
+
+    evaluated["required_qty"] = evaluated["qty_per_batch"] * num_batches
+    if not materials_stock:
+        evaluated["available_oh"] = 0.0
+    else:
+        evaluated["available_oh"] = (
+            evaluated["_match_code"].map(materials_stock).fillna(0.0)
+        )
+    evaluated["gap_qty"] = evaluated["available_oh"] - evaluated["required_qty"]
+    evaluated["is_short"] = evaluated["gap_qty"] < 0
+
+    limiting = evaluated[evaluated["is_short"]]
+    if not limiting.empty:
+        limiting_sorted = (
+            limiting.assign(shortfall=lambda df: -df["gap_qty"])
+            .sort_values("shortfall", ascending=False)
+        )
+        limiting_summary = ", ".join(
+            f"{row.component_name or row.component_code}: {row.shortfall:,.0f}"
+            for _, row in limiting_sorted.head(3).iterrows()
+        )
+    else:
+        limiting_summary = ""
+
+    feasible_batches: list[float] = []
+    for _, row in evaluated.iterrows():
+        per_batch = row["qty_per_batch"]
+        if per_batch is None or per_batch <= 0:
+            continue
+        feasible_batches.append(row["available_oh"] / per_batch)
+
+    if feasible_batches:
+        max_batches = min(feasible_batches)
+    else:
+        max_batches = float("inf")
+
+    max_finished_qty = max_batches * base_recipe_qty if np.isfinite(max_batches) else float("inf")
+    shortage_flag = not limiting.empty and (not np.isfinite(max_finished_qty) or max_finished_qty < required_qty)
+    shortfall_qty = (
+        max(required_qty - max_finished_qty, 0.0)
+        if shortage_flag and np.isfinite(max_finished_qty)
+        else 0.0
+    )
+
+    return {
+        "required_qty": required_qty,
+        "max_feasible_qty": max_finished_qty,
+        "shortfall_qty": shortfall_qty,
+        "shortage_flag": bool(shortage_flag),
+        "limiting_summary": limiting_summary,
+        "components_table": evaluated.drop(columns=["_match_code"], errors="ignore"),
+        "excluded_components": excluded_components,
+        "coverage_evaluated": True,
+    }
+
+
+def render_bom_calculator(materials_df: pd.DataFrame) -> None:
+    render_hero_banner(
+        title="Affordability + Availability",
+        subtitle="Assess BOM cost impact and material coverage in one place.",
+        icon="🚩",
+        meta="Turn The Planning Up ⬆️💡⬆️",
+        gradient="linear-gradient(120deg, #6a11cb 0%, #2575fc 100%)",
+    )
+    bom_upload = st.file_uploader(
+        "⬆️ ارفع ملف BOM/Recipe",
+        type=["xlsx"],
+        key="bom_recipe_uploader",
+        help="ارفع ملف BOM/Recipe أو استخدم الملف الافتراضي إن وُجد.",
+    )
+
+    bom_bytes = bom_upload.getvalue() if bom_upload else None
+    using_default_bom = bom_upload is None
+
+    if using_default_bom:
+        if BOM_DEFAULT_PATH.exists():
+            st.caption(f"يتم استخدام الملف الافتراضي: {BOM_DEFAULT_PATH.name}")
+        else:
+            st.warning("⚠️ لم يتم العثور على ملف BOM افتراضي، يرجى رفع ملف BOM.")
+
+    apply_active_filter = st.checkbox(
+        "✅ استخدم فقط الأصناف المفعلة (Active = Yes)",
+        value=True,
+        key="bom_active_filter",
+    )
+
+    try:
+        bom_df, recipe_df = load_bom_workbook(bom_bytes, allow_default=using_default_bom)
+    except FileNotFoundError as exc:
+        st.error(str(exc))
+        st.stop()
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Unable to read BOM workbook: {exc}")
+        st.stop()
+
+    if bom_df.empty:
+        st.error("ورقة 'Bom Data' غير موجودة أو فارغة.")
+        st.stop()
+    if recipe_df.empty:
+        st.warning("ورقة 'Recipe Data' غير موجودة أو فارغة، سيتم الاعتماد على بيانات BOM فقط.")
+
+    required_bom_cols = {"BomVersion_ItemId", "ItemName", "ItemId", "UnitId", "BOMQty", "Name"}
+    missing_bom_cols = [col for col in required_bom_cols if col not in bom_df.columns]
+    if missing_bom_cols:
+        st.error(
+            "ملف BOM يفتقد للأعمدة التالية: " + ", ".join(missing_bom_cols)
+        )
+        st.stop()
+
+    recipe_required = {"BomVersion_ItemId", "ItemName", "ItemId", "UnitId", "BOMQty"}
+    missing_recipe_cols = [col for col in recipe_required if col not in recipe_df.columns]
+
+    bom_df = bom_df.copy()
+    recipe_df = recipe_df.copy()
+
+    if apply_active_filter and "Active" in bom_df.columns:
+        bom_df = bom_df[bom_df["Active"].astype(str).str.strip().str.upper() == "YES"].copy()
+    if apply_active_filter and "Active" in recipe_df.columns:
+        recipe_df = recipe_df[recipe_df["Active"].astype(str).str.strip().str.upper() == "YES"].copy()
+
+    cost_df = materials_df.copy()
+    if cost_df.empty:
+        st.warning("⚠️ لم يتم تحميل بيانات Materials، سيتم الحساب بدون تكاليف أو أرصدة.")
+    else:
+        cost_df["ItemNumber"] = cost_df["ItemNumber"].astype(str).str.strip()
+        if "ItemName" in cost_df.columns:
+            cost_df["ItemName"] = cost_df["ItemName"].astype(str).str.strip()
+        for col in ("Cost", "OH"):
+            if col not in cost_df.columns:
+                cost_df[col] = 0
+            cost_df[col] = pd.to_numeric(cost_df[col], errors="coerce").fillna(0.0)
+        if apply_active_filter and "Active" in cost_df.columns:
+            cost_df = cost_df[cost_df["Active"].astype(str).str.strip().str.upper() == "YES"].copy()
+
+    products_list = (
+        bom_df[["Name", "BomVersion_ItemId"]]
+        .drop_duplicates(subset=["BomVersion_ItemId"])
+        .dropna(subset=["BomVersion_ItemId"])
+    )
+    product_display = {
+        f"{row['Name']} ({row['BomVersion_ItemId']})": row["BomVersion_ItemId"]
+        for _, row in products_list.iterrows()
+        if pd.notna(row["Name"])
+    }
+
+    if not product_display:
+        st.info("لا توجد منتجات متاحة بعد تطبيق المرشحات الحالية.")
+        st.stop()
+
+    st.subheader("🔍 ابحث عن المنتج التام")
+    search_query = st.text_input("اكتب اسم المنتج أو كود المنتج:", key="bom_product_search")
+
+    if search_query:
+        q = search_query.strip()
+        filtered_by_code = [k for k, v in product_display.items() if q in str(v)]
+        filtered_by_name = [k for k in product_display if q.lower() in k.lower()]
+        filtered_products = list(dict.fromkeys(filtered_by_code + filtered_by_name))
+    else:
+        filtered_products = list(product_display.keys())
+
+    selected_display = None
+    if filtered_products:
+        if len(filtered_products) == 1 and search_query:
+            selected_display = filtered_products[0]
+        else:
+            selected_display = st.selectbox(
+                "اختر المنتج من القائمة:",
+                options=filtered_products,
+                key="bom_product_select",
+            )
+
+    if not selected_display:
+        st.info("يرجى اختيار منتج تام لعرض تفاصيل BOM.")
+        return
+
+    selected_product_code = product_display.get(selected_display)
+    batch_qty = st.number_input(
+        "🔢 أدخل كمية الإنتاج المطلوبة (كجم)",
+        min_value=0.0,
+        value=1000.0,
+        step=100.0,
+        key="bom_batch_qty",
+    )
+
+    if batch_qty <= 0:
+        st.warning("⚠️ الرجاء إدخال كمية إنتاج أكبر من صفر.")
+        return
+
+    bom_items = bom_df[
+        bom_df["BomVersion_ItemId"].astype(str) == str(selected_product_code)
+    ].copy()
+    if bom_items.empty:
+        st.warning("لا توجد مكونات BOM مرتبطة بالمنتج المختار.")
+        return
+
+    recipe_row = bom_items[bom_items["ItemName"].str.contains("طبخة", case=False, na=False)]
+    if recipe_row.empty:
+        base_recipe_qty = 1.0
+        num_batches = batch_qty
+        recipe_code = None
+    else:
+        base_recipe_qty = (
+            pd.to_numeric(recipe_row["BOMQty"], errors="coerce").fillna(0.0).iloc[0]
+        )
+        base_recipe_qty = base_recipe_qty if base_recipe_qty > 0 else 1.0
+        recipe_code = str(recipe_row["ItemId"].iloc[0]).strip()
+        num_batches = batch_qty / base_recipe_qty
+
+    results: list[dict[str, float | str]] = []
+
+    bom_pack = bom_items[~bom_items["ItemName"].str.contains("طبخة", case=False, na=False)].copy()
+    for _, row in bom_pack.iterrows():
+        qty_value = pd.to_numeric(row.get("BOMQty", 0), errors="coerce")
+        qty = float(qty_value) if pd.notna(qty_value) else 0.0
+        results.append(
+            {
+                "النوع": "تعبئة وتغليف",
+                "اسم الصنف": str(row.get("ItemName", "")).strip(),
+                "كود الصنف": str(row.get("ItemId", "")).strip(),
+                "الوحدة": str(row.get("UnitId", "")).strip(),
+                "الكمية الأصلية (لكل طبخة)": qty,
+                "الكمية المطلوبة": qty * num_batches,
+            }
+        )
+
+    if recipe_code and not recipe_df.empty and not missing_recipe_cols:
+        recipe_items = recipe_df[
+            recipe_df["BomVersion_ItemId"].astype(str) == str(recipe_code)
+        ].copy()
+        for _, row in recipe_items.iterrows():
+            qty_value = pd.to_numeric(row.get("BOMQty", 0), errors="coerce")
+            qty = float(qty_value) if pd.notna(qty_value) else 0.0
+            results.append(
+                {
+                    "النوع": "مواد خام",
+                    "اسم الصنف": str(row.get("ItemName", "")).strip(),
+                    "كود الصنف": str(row.get("ItemId", "")).strip(),
+                    "الوحدة": str(row.get("UnitId", "")).strip(),
+                    "الكمية الأصلية (لكل طبخة)": qty,
+                    "الكمية المطلوبة": qty * num_batches,
+                }
+            )
+
+    if not results:
+        st.info("لا توجد مكونات قابلة للعرض بعد تطبيق المرشحات.")
+        return
+
+    combined_df = pd.DataFrame(results)
+    combined_df["الكمية الأصلية (لكل طبخة)"] = pd.to_numeric(
+        combined_df["الكمية الأصلية (لكل طبخة)"], errors="coerce"
+    ).fillna(0.0)
+    combined_df["الكمية المطلوبة"] = pd.to_numeric(
+        combined_df["الكمية المطلوبة"], errors="coerce"
+    ).fillna(0.0)
+    combined_df["كود الصنف"] = combined_df["كود الصنف"].astype(str).str.strip()
+
+    if not cost_df.empty and "ItemNumber" in cost_df.columns:
+        merged = combined_df.merge(
+            cost_df[["ItemNumber", "ItemName", "Cost", "OH"]],
+            how="left",
+            left_on="كود الصنف",
+            right_on="ItemNumber",
+        )
+        merged["تكلفة الوحدة"] = pd.to_numeric(merged["Cost"], errors="coerce").fillna(0.0)
+        merged["الرصيد المتاح (OH)"] = pd.to_numeric(merged["OH"], errors="coerce").fillna(0.0)
+        merged["إجمالي التكلفة"] = merged["الكمية المطلوبة"] * merged["تكلفة الوحدة"]
+        merged.drop(columns=["ItemNumber", "ItemName", "Cost", "OH"], inplace=True)
+        combined_df = merged
+    else:
+        combined_df["تكلفة الوحدة"] = 0.0
+        combined_df["الرصيد المتاح (OH)"] = 0.0
+        combined_df["إجمالي التكلفة"] = 0.0
+
+    total_cost = combined_df["إجمالي التكلفة"].sum()
+    st.dataframe(combined_df, use_container_width=True)
+
+    req_per_batch = combined_df[[
+        "كود الصنف",
+        "اسم الصنف",
+        "النوع",
+        "الوحدة",
+        "الكمية الأصلية (لكل طبخة)",
+        "الرصيد المتاح (OH)",
+    ]].copy()
+    req_per_batch = req_per_batch[req_per_batch["الكمية الأصلية (لكل طبخة)"] > 0]
+    req_per_batch["الطبخات الممكنة لكل مكوّن"] = req_per_batch.apply(
+        lambda r: (r["الرصيد المتاح (OH)"] / r["الكمية الأصلية (لكل طبخة)"])
+        if r["الكمية الأصلية (لكل طبخة)"] > 0
+        else np.nan,
+        axis=1,
+    )
+    max_batches_possible = (
+        req_per_batch["الطبخات الممكنة لكل مكوّن"].replace([np.inf], pd.NA).min()
+        if not req_per_batch.empty
+        else 0.0
+    )
+    max_batches_possible = float(max_batches_possible) if pd.notna(max_batches_possible) else 0.0
+    max_finished_qty_kg = max_batches_possible * base_recipe_qty
+
+    st.subheader("🧮 أقصى كمية ممكن إنتاجها بناءً على الأرصدة")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric("🏭 أقصى عدد طبخات ممكن", f"{max_batches_possible:,.2f}")
+    with c2:
+        st.metric("📦 أقصى كمية منتج تام ممكنة (كجم)", f"{max_finished_qty_kg:,.2f}")
+
+    st.subheader("⛔ المكونات المقيِّدة للإنتاج")
+    limiting = req_per_batch.sort_values(
+        "الطبخات الممكنة لكل مكوّن",
+        ascending=True,
+    ).head(10)
+    st.dataframe(limiting, use_container_width=True)
+
+    st.subheader("📝 Insights")
+    insights: list[str] = []
+    if max_batches_possible == 0:
+        insights.append(
+            "لا توجد طبخات ممكنة حاليًا بسبب نفاد بعض المكونات أو عدم توفر رصيد OH."
+        )
+    else:
+        insights.append(
+            f"أقصى إنتاج ممكن: {max_batches_possible:,.2f} طبخة = {max_finished_qty_kg:,.2f} كجم من المنتج التام."
+        )
+    if not limiting.empty:
+        lim_names = ", ".join(limiting.head(3)["اسم الصنف"].tolist())
+        insights.append(f"أكثر ثلاث مكونات تقييدًا: {lim_names}.")
+    if "تكلفة الوحدة" in combined_df.columns and not combined_df.empty:
+        cost_by_type = combined_df.groupby("النوع", as_index=False)["إجمالي التكلفة"].sum()
+        if not cost_by_type.empty:
+            high_cost_share = cost_by_type.sort_values("إجمالي التكلفة", ascending=False).iloc[0]
+            insights.append(
+                f"أعلى مساهمة في التكلفة تأتي من فئة: {high_cost_share['النوع']}"
+                f" بقيمة {high_cost_share['إجمالي التكلفة']:,.2f} جنيه."
+            )
+        top_cost_component = combined_df.sort_values("إجمالي التكلفة", ascending=False).iloc[0]
+        insights.append(
+            f"أعلى مكوّن تكلفة: {top_cost_component['اسم الصنف']}"
+            f" بإجمالي {top_cost_component['إجمالي التكلفة']:,.2f} جنيه."
+        )
+    if base_recipe_qty > 0:
+        insights.append(f"وزن الطبخة الأساسي: {base_recipe_qty:,.2f} كجم.")
+
+    for idx, txt in enumerate(insights, 1):
+        st.write(f"- **Insight {idx}:** {txt}")
+
+    output = io.BytesIO()
+    timestamp = datetime.now()
+    try:
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            combined_df.to_excel(writer, index=False, sheet_name="جميع المكونات")
+            req_per_batch.to_excel(writer, index=False, sheet_name="تحليل الأرصدة")
+            limiting.to_excel(writer, index=False, sheet_name="مكونات مقيِّدة")
+            summary = pd.DataFrame(
+                [
+                    {
+                        "المنتج": selected_display,
+                        "كود المنتج": selected_product_code,
+                        "رقم الطبخة": recipe_code if recipe_code else "غير متوفر",
+                        "الكمية المطلوبة (كجم)": batch_qty,
+                        "وزن الطبخة الأساسي (كجم)": base_recipe_qty,
+                        "عدد الطبخات المحسوبة": round(num_batches, 4),
+                        "أقصى عدد طبخات ممكن": round(max_batches_possible, 4),
+                        "أقصى كمية منتج تام ممكنة (كجم)": round(max_finished_qty_kg, 2),
+                        "إجمالي تكلفة الإنتاج": round(total_cost, 2),
+                        "تاريخ الإنشاء": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                ]
+            )
+            summary.to_excel(writer, index=False, sheet_name="الملخص")
+    except ImportError:
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            combined_df.to_excel(writer, index=False, sheet_name="جميع المكونات")
+            req_per_batch.to_excel(writer, index=False, sheet_name="تحليل الأرصدة")
+            limiting.to_excel(writer, index=False, sheet_name="مكونات مقيِّدة")
+            summary = pd.DataFrame(
+                [
+                    {
+                        "المنتج": selected_display,
+                        "كود المنتج": selected_product_code,
+                        "رقم الطبخة": recipe_code if recipe_code else "غير متوفر",
+                        "الكمية المطلوبة (كجم)": batch_qty,
+                        "وزن الطبخة الأساسي (كجم)": base_recipe_qty,
+                        "عدد الطبخات المحسوبة": round(num_batches, 4),
+                        "أقصى عدد طبخات ممكن": round(max_batches_possible, 4),
+                        "أقصى كمية منتج تام ممكنة (كجم)": round(max_finished_qty_kg, 2),
+                        "إجمالي تكلفة الإنتاج": round(total_cost, 2),
+                        "تاريخ الإنشاء": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                ]
+            )
+            summary.to_excel(writer, index=False, sheet_name="الملخص")
+    output.seek(0)
+
+    product_name = str(selected_display).split("(")[0].strip().replace(" ", "_")[:30]
+    filename = f"BOM_{product_name}_إنتاج_{int(batch_qty)}كجم.xlsx"
+    st.download_button(
+        label="⬇️ تحميل النتائج كملف Excel",
+        data=output.getvalue(),
+        file_name=filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="bom_download_results",
+    )
+
+    st.markdown("---")
+    st.subheader("🔍 تحليل خامة بناءً على الرصيد المتاح")
+
+    if cost_df.empty:
+        st.info("لا تتوفر بيانات تكلفة لتحليل الخامات.")
+        return
+
+    def classify_usage(name: str) -> str:
+        if pd.isna(name):
+            return "Other"
+        name = str(name).strip()
+        if "تصدير" in name:
+            return "Export"
+        if "محلي" in name or "محلى" in name:
+            return "Local"
+        return "Other"
+
+    def calculate_fg_total_cost(fg_code: str) -> float:
+        fg_bom = bom_df[bom_df["BomVersion_ItemId"] == fg_code][["ItemId", "BOMQty", "ItemName"]]
+        fg_recipe_links = fg_bom[
+            fg_bom["ItemName"].str.contains("طبخة", case=False, na=False)
+        ]["ItemId"].tolist()
+        fg_recipe = recipe_df[recipe_df["BomVersion_ItemId"].isin(fg_recipe_links)][["ItemId", "BOMQty"]]
+
+        all_components = pd.concat(
+            [fg_bom[["ItemId", "BOMQty"]], fg_recipe], ignore_index=True
+        )
+        all_components = all_components.merge(
+            cost_df[["ItemNumber", "Cost"]],
+            left_on="ItemId",
+            right_on="ItemNumber",
+            how="left",
+        )
+        all_components["Cost"] = pd.to_numeric(all_components["Cost"], errors="coerce").fillna(0.0)
+        all_components["BOMQty"] = pd.to_numeric(
+            all_components["BOMQty"], errors="coerce"
+        ).fillna(0.0)
+        all_components["comp_total"] = all_components["BOMQty"] * all_components["Cost"]
+        return float(all_components["comp_total"].sum())
+
+    component_query = st.text_input(
+        "اكتب اسم الخامة أو جزء منه (من ملف Materials):",
+        key="bom_component_search",
+    )
+    if not component_query:
+        return
+
+    suggestions = cost_df[
+        cost_df["ItemName"].str.contains(component_query, case=False, na=False)
+    ]
+    if suggestions.empty:
+        st.warning("⚠️ لا توجد خامات مطابقة للبحث")
+        return
+
+    component_selected = st.selectbox(
+        "اختر الخامة:",
+        options=suggestions["ItemName"].tolist(),
+        key="bom_component_select",
+    )
+    if not component_selected:
+        return
+
+    comp_row = suggestions[suggestions["ItemName"] == component_selected].iloc[0]
+    comp_code = str(comp_row["ItemNumber"])
+    comp_oh = float(comp_row["OH"])
+    comp_cost = float(comp_row.get("Cost", 0.0))
+
+    st.info(
+        f"✅ الخامة المختارة: {component_selected} | الكود: {comp_code} | "
+        f"الرصيد المتاح: {comp_oh} | تكلفة الوحدة: {comp_cost}"
+    )
+
+    results_rows: list[dict[str, float | str | None]] = []
+
+    used_in_bom = bom_df[bom_df["ItemId"] == comp_code][["BomVersion_ItemId", "BOMQty", "Name"]]
+    for _, row in used_in_bom.iterrows():
+        fg_code = str(row["BomVersion_ItemId"])
+        fg_name = str(row["Name"])
+        qty_value = pd.to_numeric(row["BOMQty"], errors="coerce")
+        qty_per_batch = float(qty_value) if pd.notna(qty_value) else 0.0
+        if qty_per_batch <= 0:
+            continue
+        max_batches = comp_oh / qty_per_batch if qty_per_batch else 0
+        recipe_row_fg = bom_df[
+            (bom_df["BomVersion_ItemId"] == fg_code)
+            & (bom_df["Name"].str.contains("طبخة", case=False, na=False))
+        ]
+        base_qty = (
+            pd.to_numeric(recipe_row_fg["BOMQty"], errors="coerce").fillna(0.0).iloc[0]
+            if not recipe_row_fg.empty
+            else 1.0
+        )
+        max_finished_qty = max_batches * base_qty
+        fg_total_cost = calculate_fg_total_cost(fg_code)
+        cost_in_product = qty_per_batch * comp_cost
+        share = (cost_in_product / fg_total_cost * 100) if fg_total_cost > 0 else None
+
+        results_rows.append(
+            {
+                "نوع الخامة": "Pack",
+                "المنتج": fg_name,
+                "كود المنتج": fg_code,
+                "الكمية لكل طبخة": qty_per_batch,
+                "أقصى عدد طبخات ممكنة": round(max_batches, 2),
+                "أقصى كمية منتج تام ممكنة (كجم)": round(max_finished_qty, 2),
+                "تصنيف الاستخدام": classify_usage(fg_name),
+                "تكلفة الخامة في المنتج": cost_in_product,
+                "إجمالي تكلفة المنتج": fg_total_cost,
+                "نسبة تكلفة الخامة من المنتج (%)": share,
+            }
+        )
+
+    used_in_recipe = recipe_df[recipe_df["ItemId"] == comp_code][["BomVersion_ItemId", "BOMQty", "Name"]]
+    for _, row in used_in_recipe.iterrows():
+        recipe_code = str(row["BomVersion_ItemId"])
+        recipe_name = str(row["Name"])
+        qty_value = pd.to_numeric(row["BOMQty"], errors="coerce")
+        qty_per_batch = float(qty_value) if pd.notna(qty_value) else 0.0
+        if qty_per_batch <= 0:
+            continue
+        max_batches = comp_oh / qty_per_batch if qty_per_batch else 0
+        recipe_row_recipe = recipe_df[
+            (recipe_df["BomVersion_ItemId"] == recipe_code)
+            & (recipe_df["Name"].str.contains("طبخة", case=False, na=False))
+        ]
+        base_qty = (
+            pd.to_numeric(recipe_row_recipe["BOMQty"], errors="coerce").fillna(0.0).iloc[0]
+            if not recipe_row_recipe.empty
+            else 1.0
+        )
+        max_finished_qty = max_batches * base_qty
+
+        fg_links = (
+            bom_df[bom_df["ItemId"] == recipe_code][["BomVersion_ItemId", "Name"]]
+            .drop_duplicates()
+        )
+        if fg_links.empty:
+            fg_total_cost = 0.0
+            cost_in_product = qty_per_batch * comp_cost
+            results_rows.append(
+                {
+                    "نوع الخامة": "Raw",
+                    "المنتج": recipe_name,
+                    "كود المنتج": recipe_code,
+                    "الكمية لكل طبخة": qty_per_batch,
+                    "أقصى عدد طبخات ممكنة": round(max_batches, 2),
+                    "أقصى كمية منتج تام ممكنة (كجم)": round(max_finished_qty, 2),
+                    "تصنيف الاستخدام": classify_usage(recipe_name),
+                    "تكلفة الخامة في المنتج": cost_in_product,
+                    "إجمالي تكلفة المنتج": fg_total_cost,
+                    "نسبة تكلفة الخامة من المنتج (%)": None,
+                }
+            )
+        else:
+            for _, fg in fg_links.iterrows():
+                fg_code = str(fg["BomVersion_ItemId"])
+                fg_name = str(fg["Name"])
+                fg_total_cost = calculate_fg_total_cost(fg_code)
+                cost_in_product = qty_per_batch * comp_cost
+                share = (cost_in_product / fg_total_cost * 100) if fg_total_cost > 0 else None
+                results_rows.append(
+                    {
+                        "نوع الخامة": "Raw",
+                        "المنتج": fg_name,
+                        "كود المنتج": fg_code,
+                        "الكمية لكل طبخة": qty_per_batch,
+                        "أقصى عدد طبخات ممكنة": round(max_batches, 2),
+                        "أقصى كمية منتج تام ممكنة (كجم)": round(max_finished_qty, 2),
+                        "تصنيف الاستخدام": classify_usage(fg_name),
+                        "تكلفة الخامة في المنتج": cost_in_product,
+                        "إجمالي تكلفة المنتج": fg_total_cost,
+                        "نسبة تكلفة الخامة من المنتج (%)": share,
+                    }
+                )
+
+    if not results_rows:
+        st.info("❕ هذه الخامة غير مستخدمة في أي منتج تام أو طبخة")
+        return
+
+    results_df = pd.DataFrame(results_rows)
+    if comp_oh > 0:
+        results_df["نسبة استهلاك الخامة (%)"] = (
+            results_df["الكمية لكل طبخة"] / comp_oh
+        ) * 100
+    else:
+        results_df["نسبة استهلاك الخامة (%)"] = np.nan
+
+    st.subheader("📊 نتائج تحليل الخامة")
+    st.dataframe(results_df, use_container_width=True)
+
+    insights_components: list[str] = []
+    if results_df["نسبة تكلفة الخامة من المنتج (%)"].notna().any():
+        top_share = results_df.sort_values(
+            "نسبة تكلفة الخامة من المنتج (%)",
+            ascending=False,
+        ).iloc[0]
+        insights_components.append(
+            f"🔎 أعلى اعتماد على الخامة: {top_share['المنتج']} "
+            f"تمثل {top_share['نسبة تكلفة الخامة من المنتج (%)']:.2f}% من إجمالي تكلفته."
+        )
+
+    top_qty = results_df.sort_values("الكمية لكل طبخة", ascending=False).iloc[0]
+    insights_components.append(
+        f"📦 أكثر منتج يستهلك الخامة ككمية مطلقة: {top_qty['المنتج']} "
+        f"بكمية {top_qty['الكمية لكل طبخة']:.2f} لكل طبخة."
+    )
+
+    top_prod = results_df.sort_values(
+        "أقصى كمية منتج تام ممكنة (كجم)", ascending=False
+    ).iloc[0]
+    insights_components.append(
+        f"🔝 أكثر منتج يمكن إنتاجه من الخامة: {top_prod['المنتج']} "
+        f"بكمية {top_prod['أقصى كمية منتج تام ممكنة (كجم)']:.2f} كجم."
+    )
+
+    usage_summary = results_df.groupby("تصنيف الاستخدام")[
+        "أقصى كمية منتج تام ممكنة (كجم)"
+    ].sum()
+    for usage, qty in usage_summary.items():
+        insights_components.append(f"🌍 إجمالي استخدام {usage}: {qty:,.2f} كجم")
+
+    st.subheader("📝 Insights")
+    for idx, txt in enumerate(insights_components, 1):
+        st.write(f"- **Insight {idx}:** {txt}")
+
 
 st.set_page_config(page_title="Inventory Simulator", layout="wide")
 
@@ -714,13 +2039,16 @@ XLSXWRITER_AVAILABLE = True
 @st.cache_data
 def load_data(file_bytes: bytes | None = None):
     data_source = io.BytesIO(file_bytes) if file_bytes else DEFAULT_DATA_PATH
-    df = pd.read_excel(data_source, sheet_name=SHEET_NAME, engine="pyxlsb")
+    df = pd.read_excel(data_source, sheet_name=SHEET_NAME, engine="pyxlsb", dtype={"ItemNumber": str})
 
     # Prepare ItemNumber and remove blank rows
-    df["ItemNumber"] = df["ItemNumber"].astype(str).str.strip()
-    valid_items_mask = df["ItemNumber"].ne("") & df["ItemNumber"].str.lower().ne("nan")
-    df = df.loc[valid_items_mask].copy()
-    df["ItemNumber"] = df["ItemNumber"].str.zfill(6)
+    if "ItemNumber" in df.columns:
+        df["ItemNumber"] = df["ItemNumber"].astype(str).str.strip()
+        valid_items_mask = df["ItemNumber"].ne("") & df["ItemNumber"].str.lower().ne("nan")
+        df = df.loc[valid_items_mask].copy()
+    else:
+        # Fallback if ItemNumber column doesn't exist
+        df = df.dropna(how="all")
     text_cols = ["ItemName", "Factory", "Storagetype", "Family", "RawType", "Unit"]
     for col in text_cols:
         if col in df.columns:
@@ -806,13 +2134,16 @@ else:
 st.sidebar.markdown("---")
 app_view = st.sidebar.radio(
     "📑 Select view",
-    ("Inventory Simulator", "FG Explorer"),
+    ("Inventory Simulator", "FG Explorer", "BOM Calculator"),
     index=0,
     key="main_app_view",
 )
 
 if app_view == "FG Explorer":
-    render_fg_explorer()
+    render_fg_explorer(df)
+    st.stop()
+elif app_view == "BOM Calculator":
+    render_bom_calculator(df)
     st.stop()
 
 # ===========================
@@ -1559,9 +2890,13 @@ def render_inventory_dashboard():
     # ===========================
     # 5. Dashboard
     # ===========================
-    st.title("📦 Inventory Simulator")
-    render_accent_subheader("Turn ThePlanning Up")
-    st.markdown(f"**Date:** {today.strftime('%d %B %Y')}")
+    render_hero_banner(
+        title="Inventory Simulator",
+        subtitle=f"Daily snapshot · {today.strftime('%d %B %Y')}",
+        icon="📦",
+        meta="Turn The Planning Up ⬆️💡⬆️",
+        gradient="linear-gradient(120deg, #00c6ff 0%, #0072ff 50%, #0041ff 100%)",
+    )
 
     # استخدام الفاصلة للألوف في الأرقام
     col1,col2,col3,col4,col5 = st.columns(5)
@@ -1653,7 +2988,7 @@ def render_inventory_dashboard():
 
         total_factory_oh_value = factory_cards_summary["OH_value"].sum()
 
-        st.markdown("### 🏭 Factory OH Value")
+        st.markdown("### Factory OH Value")
 
         card_chunk_size = 4
         for start in range(0, len(factory_cards_summary), card_chunk_size):
@@ -1663,8 +2998,12 @@ def render_inventory_dashboard():
                 with col:
                     share = row['OH_value'] / total_factory_oh_value if total_factory_oh_value else np.nan
                     delta_text = format_percentage(share) if not np.isnan(share) else "-"
+                    factory_name = row['Factory']
+                    icon = _get_factory_icon(factory_name)
+                    # Use larger icon in metric label
+                    st.markdown(f"<h3 style='font-size: 1.5em; margin: 0;'>{icon}</h3>", unsafe_allow_html=True)
                     st.metric(
-                        label=f"🏭 {row['Factory']}",
+                        label=factory_name,
                         value=format_magnitude(row['OH_value'], " EGP"),
                         delta=delta_text
                     )
