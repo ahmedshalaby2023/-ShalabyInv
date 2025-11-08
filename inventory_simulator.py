@@ -182,9 +182,24 @@ def load_fg_dataset(file_bytes: bytes | None) -> pd.DataFrame:
     return merged_df
 
 
+def render_accent_subheader(text: str) -> None:
+    st.markdown(
+        f"""
+        <h3 style='
+            color: #d35400;
+            font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+            font-weight: 600;
+            margin-top: 0.5rem;
+            margin-bottom: 0.5rem;
+        '>{text}</h3>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_fg_explorer() -> None:
     st.title("🏷️ FG Explorer")
-    st.subheader("Turn Planning Up")
+    render_accent_subheader("Turn ThePlanning Up")
     st.caption("Analyze finished goods by cascading filters and KPIs.")
 
     def _normalize_name(name: str | int) -> str:
@@ -1545,7 +1560,7 @@ def render_inventory_dashboard():
     # 5. Dashboard
     # ===========================
     st.title("📦 Inventory Simulator")
-    st.subheader("Turn Planning Up")
+    render_accent_subheader("Turn ThePlanning Up")
     st.markdown(f"**Date:** {today.strftime('%d %B %Y')}")
 
     # استخدام الفاصلة للألوف في الأرقام
