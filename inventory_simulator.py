@@ -2112,10 +2112,18 @@ uploaded_materials = st.sidebar.file_uploader(
     key="materials_uploader"
 )
 materials_bytes = uploaded_materials.getvalue() if uploaded_materials else None
-df = load_data(materials_bytes)
+try:
+    df = load_data(materials_bytes)
+except FileNotFoundError:
+    df = pd.DataFrame()
+    st.sidebar.warning("⚠️ Default Materials file not found")
+except Exception as exc:
+    df = pd.DataFrame()
+    st.sidebar.error(f"Error loading Materials: {exc}")
+
 if uploaded_materials:
     st.sidebar.success(f"✓ {uploaded_materials.name}")
-else:
+elif not df.empty:
     st.sidebar.caption(f"Using: {DEFAULT_DATA_PATH.name}")
 
 # 2. CalcHelp Sheet
@@ -2710,49 +2718,55 @@ def compute_supply_schedule(
 # ===========================
 st.sidebar.header("🔍 Filters")
 
-# SKU search (temporarily disables other filters)
-search_options = [f"{str(row['ItemNumber']).zfill(6)} - {row['ItemName']}" 
-                  for _, row in df[["ItemNumber","ItemName"]].drop_duplicates().iterrows()]
-item_search = st.sidebar.selectbox("Search for SKU", options=[""]+sorted(search_options))
+# Check if Materials data is loaded
+if df.empty:
+    st.sidebar.info("📦 Please upload Materials data to use filters")
+    df_filtered = df.copy()
+    search_active = False
+else:
+    # SKU search (temporarily disables other filters)
+    search_options = [f"{str(row['ItemNumber']).zfill(6)} - {row['ItemName']}" 
+                      for _, row in df[["ItemNumber","ItemName"]].drop_duplicates().iterrows()]
+    item_search = st.sidebar.selectbox("Search for SKU", options=[""]+sorted(search_options))
 
-df_filtered = df.copy()
-search_active = False
-if item_search:
-    search_active = True
-    item_code = item_search.split(" - ")[0]
-    df_filtered = df_filtered[df_filtered["ItemNumber"]==item_code]
-    st.sidebar.success("✅ SKU selected")
+    df_filtered = df.copy()
+    search_active = False
+    if item_search:
+        search_active = True
+        item_code = item_search.split(" - ")[0]
+        df_filtered = df_filtered[df_filtered["ItemNumber"]==item_code]
+        st.sidebar.success("✅ SKU selected")
 
-# Other filters
-if not search_active:
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Or use filters:")
-    
-    all_option = "All"
+    # Other filters
+    if not search_active:
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("Or use filters:")
+        
+        all_option = "All"
 
-    # Factory filter
-    factories = [all_option]+sorted(df["Factory"].unique())
-    selected_factory = st.sidebar.multiselect("Select factory", factories, default=[all_option])
-    if all_option not in selected_factory:
-        df_filtered = df_filtered[df_filtered["Factory"].isin(selected_factory)]
+        # Factory filter
+        factories = [all_option]+sorted(df["Factory"].unique())
+        selected_factory = st.sidebar.multiselect("Select factory", factories, default=[all_option])
+        if all_option not in selected_factory:
+            df_filtered = df_filtered[df_filtered["Factory"].isin(selected_factory)]
 
-    # Storage type filter (depends on previous selection)
-    storages = [all_option]+sorted(df_filtered["Storagetype"].unique())
-    selected_storage = st.sidebar.multiselect("Select storage type", storages, default=[all_option])
-    if all_option not in selected_storage:
-        df_filtered = df_filtered[df_filtered["Storagetype"].isin(selected_storage)]
+        # Storage type filter (depends on previous selection)
+        storages = [all_option]+sorted(df_filtered["Storagetype"].unique())
+        selected_storage = st.sidebar.multiselect("Select storage type", storages, default=[all_option])
+        if all_option not in selected_storage:
+            df_filtered = df_filtered[df_filtered["Storagetype"].isin(selected_storage)]
 
-    # Family filter
-    families = [all_option]+sorted(df_filtered["Family"].unique())
-    selected_family = st.sidebar.multiselect("Select family", families, default=[all_option])
-    if all_option not in selected_family:
-        df_filtered = df_filtered[df_filtered["Family"].isin(selected_family)]
+        # Family filter
+        families = [all_option]+sorted(df_filtered["Family"].unique())
+        selected_family = st.sidebar.multiselect("Select family", families, default=[all_option])
+        if all_option not in selected_family:
+            df_filtered = df_filtered[df_filtered["Family"].isin(selected_family)]
 
-    # Raw material type filter
-    rawtypes = [all_option]+sorted(df_filtered["RawType"].unique())
-    selected_rawtype = st.sidebar.multiselect("Select raw material type", rawtypes, default=[all_option])
-    if all_option not in selected_rawtype:
-        df_filtered = df_filtered[df_filtered["RawType"].isin(selected_rawtype)]
+        # Raw material type filter
+        rawtypes = [all_option]+sorted(df_filtered["RawType"].unique())
+        selected_rawtype = st.sidebar.multiselect("Select raw material type", rawtypes, default=[all_option])
+        if all_option not in selected_rawtype:
+            df_filtered = df_filtered[df_filtered["RawType"].isin(selected_rawtype)]
 
 # Additional options
 time_grouping = st.sidebar.radio("📆 Time view:", ["Monthly","Quarterly","Yearly"], index=0)
@@ -2897,24 +2911,29 @@ def calculate_monthly_inventory(df_input, calc_help):
 
     return df_calc
 
-df_with_months = calculate_monthly_inventory(df_filtered, calc_help_df)
+# Check if Materials data is loaded before calculations
+if df.empty:
+    df_with_months = pd.DataFrame()
+    df_grouped = pd.DataFrame()
+else:
+    df_with_months = calculate_monthly_inventory(df_filtered, calc_help_df)
 
-def group_months(df_input, mode="Monthly"):
-    df_grouped = df_input.copy()
-    # Since inventory is cumulative, quarter/year values use the closing month of the period
-    if mode=="Quarterly":
-        quarters_months = {"Q1": "Month_3", "Q2": "Month_6", "Q3": "Month_9", "Q4": "Month_12"}
-        for q, last_month in quarters_months.items():
-            df_grouped[q] = df_grouped[last_month] 
-            df_grouped[f"{q}_value"] = df_grouped[f"{last_month}_value"]
+    def group_months(df_input, mode="Monthly"):
+        df_grouped = df_input.copy()
+        # Since inventory is cumulative, quarter/year values use the closing month of the period
+        if mode=="Quarterly":
+            quarters_months = {"Q1": "Month_3", "Q2": "Month_6", "Q3": "Month_9", "Q4": "Month_12"}
+            for q, last_month in quarters_months.items():
+                df_grouped[q] = df_grouped[last_month] 
+                df_grouped[f"{q}_value"] = df_grouped[f"{last_month}_value"]
+                
+        elif mode=="Yearly":
+            df_grouped["Year_Total"] = df_grouped["Month_12"]
+            df_grouped["Year_Total_value"] = df_grouped["Month_12_value"]
             
-    elif mode=="Yearly":
-        df_grouped["Year_Total"] = df_grouped["Month_12"]
-        df_grouped["Year_Total_value"] = df_grouped["Month_12_value"]
-        
-    return df_grouped
+        return df_grouped
 
-df_grouped = group_months(df_with_months, mode=time_grouping)
+    df_grouped = group_months(df_with_months, mode=time_grouping)
 
 def render_inventory_dashboard():
     # ===========================
@@ -2927,6 +2946,17 @@ def render_inventory_dashboard():
         meta="Turn The Planning Up ⬆️💡⬆️",
         gradient="linear-gradient(120deg, #00c6ff 0%, #0072ff 50%, #0041ff 100%)",
     )
+    
+    # Check if Materials data is loaded
+    if df.empty:
+        st.info("📦 Please upload Materials data to start using the Inventory Simulator")
+        st.markdown("""
+        ### How to get started:
+        1. Upload your Materials XLSB file using the sidebar
+        2. Optionally upload CalcHelp, FG, and BOM files
+        3. Use filters to analyze your inventory
+        """)
+        return
 
     # استخدام الفاصلة للألوف في الأرقام
     col1,col2,col3,col4,col5 = st.columns(5)
