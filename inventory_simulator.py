@@ -81,6 +81,7 @@ def load_calc_help(data_bytes: bytes | None = None, calc_bytes: bytes | None = N
     st.warning("CalcHelp sheet not found; inventory simulation will fall back to static logic.")
     return pd.DataFrame()
 
+
 # ===========================
 # 1.a Data Source Selection
 # ===========================
@@ -848,290 +849,302 @@ def group_months(df_input, mode="Monthly"):
 
 df_grouped = group_months(df_with_months, mode=time_grouping)
 
-# ===========================
-# 5. Dashboard
-# ===========================
-st.title("📦 Inventory Simulator")
-st.markdown(f"**Date:** {today.strftime('%d %B %Y')}")
+def render_inventory_dashboard():
+    # ===========================
+    # 5. Dashboard
+    # ===========================
+    st.title("📦 Inventory Simulator")
+    st.markdown(f"**Date:** {today.strftime('%d %B %Y')}")
 
-# استخدام الفاصلة للألوف في الأرقام
-col1,col2,col3,col4,col5 = st.columns(5)
-total_oh_value = (df_filtered['OH']*df_filtered['Cost']).sum()
-predicted_value_total = df_with_months['Month_1_value'].sum()
-unique_item_count = df_filtered["ItemNumber"].nunique()
+    # استخدام الفاصلة للألوف في الأرقام
+    col1,col2,col3,col4,col5 = st.columns(5)
+    total_oh_value = (df_filtered['OH']*df_filtered['Cost']).sum()
+    predicted_value_total = df_with_months['Month_1_value'].sum()
+    unique_item_count = df_filtered["ItemNumber"].nunique()
 
-units_clean = []
-if "Unit" in df_filtered.columns:
-    units_clean = [normalize_unit(u) for u in df_filtered["Unit"].unique()]
-    units_clean = [u for u in units_clean if u]
+    units_clean = []
+    if "Unit" in df_filtered.columns:
+        units_clean = [normalize_unit(u) for u in df_filtered["Unit"].unique()]
+        units_clean = [u for u in units_clean if u]
 
-single_unit_selected = len(set(units_clean)) == 1 and units_clean
-unit_label = units_clean[0] if single_unit_selected else None
+    single_unit_selected = len(set(units_clean)) == 1 and units_clean
+    unit_label = units_clean[0] if single_unit_selected else None
 
-can_sum_quantities = search_active or unique_item_count == 1 or single_unit_selected
+    can_sum_quantities = search_active or unique_item_count == 1 or single_unit_selected
 
-predicted_qty_total = df_with_months['Month_1'].sum() if can_sum_quantities else np.nan
-share_predicted = (predicted_value_total / total_oh_value) if total_oh_value else np.nan
+    predicted_qty_total = df_with_months['Month_1'].sum() if can_sum_quantities else np.nan
+    share_predicted = (predicted_value_total / total_oh_value) if total_oh_value else np.nan
 
-# DIOH (Days Inventory on Hand) calculation
-dioh_days = None
-dioh_basis_label = None
-if can_sum_quantities:
-    cur_month_info = months_sequence[0]
-    cur_candidates = ["CurAPP", "CurBP"] + build_month_column_candidates(cur_month_info, "APP", current_year_code)
-    resolved_cur = resolve_existing_column(df_filtered, cur_candidates)
-    if resolved_cur is not None:
-        cur_series = pd.to_numeric(df_filtered[resolved_cur], errors="coerce").fillna(0)
-        cur_demand_total = cur_series.sum()
-        oh_qty_total = pd.to_numeric(df_filtered["OH"], errors="coerce").fillna(0).sum()
-        if cur_demand_total > 0 and oh_qty_total > 0:
-            dioh_days = (oh_qty_total / cur_demand_total) * 26
-            dioh_basis_label = str(resolved_cur)
-
-if dioh_days is None:
-    cost_series = pd.to_numeric(df_filtered.get("Cost", 0), errors="coerce").fillna(0)
-    requirement_preview = build_requirement_plan(df_filtered, basis="APP")
-    if requirement_preview:
-        next_month_plan = requirement_preview[0]
-        demand_series_val = next_month_plan["series"].reindex(df_filtered.index).fillna(0)
-        demand_value = (demand_series_val * cost_series).sum()
-        if demand_value > 0 and total_oh_value > 0:
-            dioh_days = (total_oh_value / demand_value) * 26
-            dioh_basis_label = f"{next_month_plan.get('source_column') or next_month_plan['month']['code']} (value-based)"
-
-
-with col1:
-    st.metric("📦 Filtered SKUs", format_magnitude(len(df_filtered)))
-with col2:
-    st.metric("💰 Current OH Value", format_magnitude(total_oh_value, " EGP"))
-    total_value_caption = format_percentage(1.0) if total_oh_value else "-"
-    st.caption(f"{total_value_caption} of filtered OH value")
-with col3:
-    st.metric("🔮 Projected Value", format_magnitude(predicted_value_total, " EGP"))
-    share_caption = format_percentage(share_predicted) if total_oh_value else "-"
-    st.caption(f"{share_caption} vs. current OH value")
-with col4:
+    # DIOH (Days Inventory on Hand) calculation
+    dioh_days = None
+    dioh_basis_label = None
     if can_sum_quantities:
-        qty_suffix = f" {unit_label}" if unit_label else " units"
-        st.metric("📦 Projected Quantity", format_magnitude(predicted_qty_total, qty_suffix))
-    else:
-        st.metric("📦 Projected Quantity", "—")
-        if single_unit_selected:
-            st.caption("Select a specific SKU to view quantity")
+        cur_month_info = months_sequence[0]
+        cur_candidates = ["CurAPP", "CurBP"] + build_month_column_candidates(cur_month_info, "APP", current_year_code)
+        resolved_cur = resolve_existing_column(df_filtered, cur_candidates)
+        if resolved_cur is not None:
+            cur_series = pd.to_numeric(df_filtered[resolved_cur], errors="coerce").fillna(0)
+            cur_demand_total = cur_series.sum()
+            oh_qty_total = pd.to_numeric(df_filtered["OH"], errors="coerce").fillna(0).sum()
+            if cur_demand_total > 0 and oh_qty_total > 0:
+                dioh_days = (oh_qty_total / cur_demand_total) * 26
+                dioh_basis_label = str(resolved_cur)
+
+    if dioh_days is None:
+        cost_series = pd.to_numeric(df_filtered.get("Cost", 0), errors="coerce").fillna(0)
+        requirement_preview = build_requirement_plan(df_filtered, basis="APP")
+        if requirement_preview:
+            next_month_plan = requirement_preview[0]
+            demand_series_val = next_month_plan["series"].reindex(df_filtered.index).fillna(0)
+            demand_value = (demand_series_val * cost_series).sum()
+            if demand_value > 0 and total_oh_value > 0:
+                dioh_days = (total_oh_value / demand_value) * 26
+                dioh_basis_label = f"{next_month_plan.get('source_column') or next_month_plan['month']['code']} (value-based)"
+
+
+    with col1:
+        st.metric("📦 Filtered SKUs", format_magnitude(len(df_filtered)))
+    with col2:
+        st.metric("💰 Current OH Value", format_magnitude(total_oh_value, " EGP"))
+        total_value_caption = format_percentage(1.0) if total_oh_value else "-"
+        st.caption(f"{total_value_caption} of filtered OH value")
+    with col3:
+        st.metric("🔮 Projected Value", format_magnitude(predicted_value_total, " EGP"))
+        share_caption = format_percentage(share_predicted) if total_oh_value else "-"
+        st.caption(f"{share_caption} vs. current OH value")
+    with col4:
+        if can_sum_quantities:
+            qty_suffix = f" {unit_label}" if unit_label else " units"
+            st.metric("📦 Projected Quantity", format_magnitude(predicted_qty_total, qty_suffix))
         else:
-            st.caption("Select a single unit or SKU to view quantity")
+            st.metric("📦 Projected Quantity", "—")
+            if single_unit_selected:
+                st.caption("Select a specific SKU to view quantity")
+            else:
+                st.caption("Select a single unit or SKU to view quantity")
 
-with col5:
-    if dioh_days is not None and np.isfinite(dioh_days):
-        st.metric("📆 Inventory Days", f"{dioh_days:,.1f} days")
-        if dioh_basis_label:
-            st.caption(f"Based on {dioh_basis_label} demand")
+    with col5:
+        if dioh_days is not None and np.isfinite(dioh_days):
+            st.metric("📆 Inventory Days", f"{dioh_days:,.1f} days")
+            if dioh_basis_label:
+                st.caption(f"Based on {dioh_basis_label} demand")
+        else:
+            st.metric("📆 Inventory Days", "—")
+            st.caption("Requires consistent demand data")
+
+    # ===========================
+    # 5.a Factory OH Cards
+    # ===========================
+    factory_cards_df = df_filtered.copy()
+    if not factory_cards_df.empty:
+        factory_cards_df["Factory"] = factory_cards_df["Factory"].fillna("Unspecified")
+        factory_cards_df["OH_value"] = factory_cards_df["OH"] * factory_cards_df["Cost"]
+        factory_cards_summary = factory_cards_df.groupby("Factory", as_index=False).agg({
+            "OH_value": "sum",
+            "OH": "sum"
+        }).sort_values("OH_value", ascending=False)
+
+        total_factory_oh_value = factory_cards_summary["OH_value"].sum()
+
+        st.markdown("### 🏭 Factory OH Value")
+
+        card_chunk_size = 4
+        for start in range(0, len(factory_cards_summary), card_chunk_size):
+            chunk = factory_cards_summary.iloc[start:start + card_chunk_size]
+            cols = st.columns(len(chunk))
+            for col, (_, row) in zip(cols, chunk.iterrows()):
+                with col:
+                    share = row['OH_value'] / total_factory_oh_value if total_factory_oh_value else np.nan
+                    delta_text = format_percentage(share) if not np.isnan(share) else "-"
+                    st.metric(
+                        label=f"🏭 {row['Factory']}",
+                        value=format_magnitude(row['OH_value'], " EGP"),
+                        delta=delta_text
+                    )
+                    st.caption("Share of filtered OH value")
     else:
-        st.metric("📆 Inventory Days", "—")
-        st.caption("Requires consistent demand data")
+        st.info("No factory data available to display.")
 
-# ===========================
-# 5.a Factory OH Cards
-# ===========================
-factory_cards_df = df_filtered.copy()
-if not factory_cards_df.empty:
-    factory_cards_df["Factory"] = factory_cards_df["Factory"].fillna("Unspecified")
-    factory_cards_df["OH_value"] = factory_cards_df["OH"] * factory_cards_df["Cost"]
-    factory_cards_summary = factory_cards_df.groupby("Factory", as_index=False).agg({
-        "OH_value": "sum",
-        "OH": "sum"
-    }).sort_values("OH_value", ascending=False)
+    return dioh_days, dioh_basis_label
 
-    total_factory_oh_value = factory_cards_summary["OH_value"].sum()
+def render_abc_analysis():
+    # ===========================
+    # 6. ABC Analysis
+    # ===========================
+    st.markdown("---")
+    st.subheader("🧮 ABC Inventory Classification")
 
-    st.markdown("### 🏭 Factory OH Value")
+    abc_enabled = st.checkbox("Enable ABC analysis on filtered data", value=False)
+    if not abc_enabled:
+        return
 
-    card_chunk_size = 4
-    for start in range(0, len(factory_cards_summary), card_chunk_size):
-        chunk = factory_cards_summary.iloc[start:start + card_chunk_size]
-        cols = st.columns(len(chunk))
-        for col, (_, row) in zip(cols, chunk.iterrows()):
-            with col:
-                share = row['OH_value'] / total_factory_oh_value if total_factory_oh_value else np.nan
-                delta_text = format_percentage(share) if not np.isnan(share) else "-"
-                st.metric(
-                    label=f"🏭 {row['Factory']}",
-                    value=format_magnitude(row['OH_value'], " EGP"),
-                    delta=delta_text
-                )
-                st.caption("Share of filtered OH value")
-else:
-    st.info("No factory data available to display.")
-
-# ===========================
-# 6. ABC Analysis
-# ===========================
-st.markdown("---")
-st.subheader("🧮 ABC Inventory Classification")
-
-abc_enabled = st.checkbox("Enable ABC analysis on filtered data", value=False)
-if abc_enabled:
     if len(months_sequence) < 2:
         st.warning("Insufficient monthly history to compute next-month consumption.")
+        return
+
+    next_month_info = months_sequence[1]
+    next_month_candidates = build_month_column_candidates(next_month_info, "APP", current_year_code)
+    resolved_next_month_col = resolve_existing_column(df_filtered, next_month_candidates)
+    if resolved_next_month_col is None:
+        available_app_cols = sorted({
+            str(col) for col in df_filtered.columns
+            if str(col).endswith(("APP", "BP"))
+        })
+        tried_labels = ", ".join(next_month_candidates)
+        st.warning(
+            "No matching consumption column found for next month. "
+            f"Tried: {tried_labels or 'none'}. Available APP/BP columns: {', '.join(available_app_cols) or 'none'}."
+        )
+        return
+
+    abc_base = df_filtered.copy()
+    next_month_series_name = str(resolved_next_month_col)
+    abc_base["NextMonthAPP"] = pd.to_numeric(abc_base[resolved_next_month_col], errors="coerce").fillna(0)
+    abc_base["ConsumptionValue"] = abc_base["NextMonthAPP"] * abc_base["Cost"]
+    abc_base["OH_value"] = abc_base["OH"] * abc_base["Cost"]
+
+    if abc_base["ConsumptionValue"].sum() <= 0:
+        st.info("Consumption value is zero for the filtered selection; unable to build ABC profile.")
+        return
+
+    group_columns = ["ItemNumber", "ItemName"]
+    if "Factory" in abc_base.columns:
+        group_columns.append("Factory")
+    if "Unit" in abc_base.columns:
+        group_columns.append("Unit")
+
+    agg_dict = {
+        "ConsumptionValue": "sum",
+        "NextMonthAPP": "sum",
+        "OH": "sum",
+        "OH_value": "sum",
+        "Cost": "mean"
+    }
+    for param in ["LT", "MINQTY", "SSDays"]:
+        if param in abc_base.columns:
+            agg_dict[param] = "first"
+
+    abc_summary = (
+        abc_base.groupby(group_columns, dropna=False)
+        .agg(agg_dict)
+        .reset_index()
+    )
+
+    total_consumption_value = abc_summary["ConsumptionValue"].sum()
+    abc_summary["Share"] = abc_summary["ConsumptionValue"] / total_consumption_value
+    abc_summary = abc_summary.sort_values("ConsumptionValue", ascending=False).reset_index(drop=True)
+    abc_summary["CumulativeShare"] = abc_summary["Share"].cumsum()
+
+    conditions = [
+        abc_summary["CumulativeShare"] <= 0.8,
+        abc_summary["CumulativeShare"] <= 0.95
+    ]
+    choices = ["A", "B"]
+    abc_summary["ABC_Class"] = np.select(conditions, choices, default="C")
+
+    if "SSDays" in abc_summary.columns:
+        abc_summary["SSDays"] = pd.to_numeric(abc_summary["SSDays"], errors="coerce")
+        abc_summary["SSQty"] = abc_summary["SSDays"].fillna(0) * (abc_summary["NextMonthAPP"] / 26.0)
     else:
-        next_month_info = months_sequence[1]
-        next_month_candidates = build_month_column_candidates(next_month_info, "APP", current_year_code)
-        resolved_next_month_col = resolve_existing_column(df_filtered, next_month_candidates)
-        if resolved_next_month_col is None:
-            available_app_cols = sorted({
-                str(col) for col in df_filtered.columns
-                if str(col).endswith(("APP", "BP"))
-            })
-            tried_labels = ", ".join(next_month_candidates)
-            st.warning(
-                "No matching consumption column found for next month. "
-                f"Tried: {tried_labels or 'none'}. Available APP/BP columns: {', '.join(available_app_cols) or 'none'}."
-            )
-        else:
-            abc_base = df_filtered.copy()
-            next_month_series_name = str(resolved_next_month_col)
-            abc_base["NextMonthAPP"] = pd.to_numeric(abc_base[resolved_next_month_col], errors="coerce").fillna(0)
-            abc_base["ConsumptionValue"] = abc_base["NextMonthAPP"] * abc_base["Cost"]
-            abc_base["OH_value"] = abc_base["OH"] * abc_base["Cost"]
+        abc_summary["SSQty"] = np.nan
 
-            if abc_base["ConsumptionValue"].sum() <= 0:
-                st.info("Consumption value is zero for the filtered selection; unable to build ABC profile.")
-            else:
-                group_columns = ["ItemNumber", "ItemName"]
-                if "Factory" in abc_base.columns:
-                    group_columns.append("Factory")
-                if "Unit" in abc_base.columns:
-                    group_columns.append("Unit")
+    abc_summary["GapToSS"] = abc_summary["OH"] - abc_summary["SSQty"]
 
-                agg_dict = {
-                    "ConsumptionValue": "sum",
-                    "NextMonthAPP": "sum",
-                    "OH": "sum",
-                    "OH_value": "sum",
-                    "Cost": "mean"
-                }
-                for param in ["LT", "MINQTY", "SSDays"]:
-                    if param in abc_base.columns:
-                        agg_dict[param] = "first"
+    top_abc_a = abc_summary[abc_summary["ABC_Class"] == "A"].copy()
 
-                abc_summary = (
-                    abc_base.groupby(group_columns, dropna=False)
-                    .agg(agg_dict)
-                    .reset_index()
-                )
+    col_abc1, col_abc2, col_abc3 = st.columns(3)
+    with col_abc1:
+        st.metric("A-class SKUs", f"{len(top_abc_a):,}")
+    with col_abc2:
+        value_share = top_abc_a["Share"].sum() if not top_abc_a.empty else np.nan
+        st.metric("A-class value share", format_percentage(value_share))
+    with col_abc3:
+        avg_lt = top_abc_a["LT"].mean() if ("LT" in top_abc_a.columns and not top_abc_a.empty) else np.nan
+        lt_text = f"{avg_lt:.1f} days" if pd.notna(avg_lt) else "N/A"
+        st.metric("Avg. lead time (A)", lt_text)
 
-                total_consumption_value = abc_summary["ConsumptionValue"].sum()
-                abc_summary["Share"] = abc_summary["ConsumptionValue"] / total_consumption_value
-                abc_summary = abc_summary.sort_values("ConsumptionValue", ascending=False).reset_index(drop=True)
-                abc_summary["CumulativeShare"] = abc_summary["Share"].cumsum()
+    insights = []
+    if not top_abc_a.empty:
+        total_a_value = top_abc_a["OH_value"].sum()
+        insights.append(f"- {len(top_abc_a):,} SKU(s) in class A cover {format_percentage(top_abc_a['Share'].sum())} of consumption value; prioritize supply adherence for these items.")
+        if np.isfinite(total_a_value):
+            insights.append(f"- Current OH value for A-class items totals {format_magnitude(total_a_value, ' EGP')}. Review replenishment cadence to stay within safety stock targets.")
+    if "GapToSS" in abc_summary.columns and not top_abc_a.empty:
+        excess_df = top_abc_a[top_abc_a["GapToSS"] > 0]
+        short_df = top_abc_a[top_abc_a["GapToSS"] < 0]
+        if not excess_df.empty:
+            excess_units = excess_df["GapToSS"].sum()
+            insights.append(f"- {len(excess_df)} A-class SKU(s) exceed safety stock by {format_magnitude(excess_units, ' units')}; adjust MINQTY releases or defer purchases.")
+        if not short_df.empty:
+            short_units = abs(short_df["GapToSS"].sum())
+            insights.append(f"- {len(short_df)} A-class SKU(s) fall below safety stock by {format_magnitude(short_units, ' units')}; expedite supply or review lead times.")
 
-                conditions = [
-                    abc_summary["CumulativeShare"] <= 0.8,
-                    abc_summary["CumulativeShare"] <= 0.95
-                ]
-                choices = ["A", "B"]
-                abc_summary["ABC_Class"] = np.select(conditions, choices, default="C")
+    insights.append(
+        f"- Safety stock quantity computed as SSDays × ({next_month_series_name} ÷ 26). "
+        "Align planning parameters (LT, MINQTY, SSDays) to control inventory levels."
+    )
 
-                if "SSDays" in abc_summary.columns:
-                    abc_summary["SSDays"] = pd.to_numeric(abc_summary["SSDays"], errors="coerce")
-                    abc_summary["SSQty"] = abc_summary["SSDays"].fillna(0) * (abc_summary["NextMonthAPP"] / 26.0)
-                else:
-                    abc_summary["SSQty"] = np.nan
+    st.markdown("**Operational insights**")
+    for tip in insights:
+        st.markdown(tip)
 
-                abc_summary["GapToSS"] = abc_summary["OH"] - abc_summary["SSQty"]
+    display_cols = group_columns + [
+        "ConsumptionValue", "Share", "CumulativeShare", "ABC_Class",
+        "NextMonthAPP", "SSQty", "GapToSS", "OH", "OH_value", "Cost"
+    ]
+    for optional_col in ["LT", "MINQTY", "SSDays"]:
+        if optional_col in abc_summary.columns and optional_col not in display_cols:
+            display_cols.append(optional_col)
 
-                top_abc_a = abc_summary[abc_summary["ABC_Class"] == "A"].copy()
+    abc_display = abc_summary[display_cols]
+    formatters = {
+        "ConsumptionValue": "{:,.0f}",
+        "Share": "{:.2%}",
+        "CumulativeShare": "{:.2%}",
+        "NextMonthAPP": "{:,.0f}",
+        "SSQty": "{:,.0f}",
+        "GapToSS": "{:,.0f}",
+        "OH": "{:,.0f}",
+        "OH_value": "{:,.0f}",
+        "Cost": "{:,.2f}"
+    }
+    optional_formatters = {"LT": "{:,.0f}", "MINQTY": "{:,.0f}", "SSDays": "{:,.0f}"}
+    for key, fmt in optional_formatters.items():
+        if key in abc_display.columns:
+            formatters[key] = fmt
 
-                col_abc1, col_abc2, col_abc3 = st.columns(3)
-                with col_abc1:
-                    st.metric("A-class SKUs", f"{len(top_abc_a):,}")
-                with col_abc2:
-                    value_share = top_abc_a["Share"].sum() if not top_abc_a.empty else np.nan
-                    st.metric("A-class value share", format_percentage(value_share))
-                with col_abc3:
-                    avg_lt = top_abc_a["LT"].mean() if ("LT" in top_abc_a.columns and not top_abc_a.empty) else np.nan
-                    lt_text = f"{avg_lt:.1f} days" if pd.notna(avg_lt) else "N/A"
-                    st.metric("Avg. lead time (A)", lt_text)
+    st.dataframe(
+        abc_display.style.format(formatters, na_rep="-"),
+        use_container_width=True
+    )
+    render_excel_download_button(
+        abc_display,
+        "📥 Download ABC Summary (Excel)",
+        "inventory_abc_summary",
+        key="download_abc_summary",
+        sheet_name="ABC"
+    )
 
-                insights = []
-                if not top_abc_a.empty:
-                    total_a_value = top_abc_a["OH_value"].sum()
-                    insights.append(f"- {len(top_abc_a):,} SKU(s) in class A cover {format_percentage(top_abc_a['Share'].sum())} of consumption value; prioritize supply adherence for these items.")
-                    if np.isfinite(total_a_value):
-                        insights.append(f"- Current OH value for A-class items totals {format_magnitude(total_a_value, ' EGP')}. Review replenishment cadence to stay within safety stock targets.")
-                if "GapToSS" in abc_summary.columns and not top_abc_a.empty:
-                    excess_df = top_abc_a[top_abc_a["GapToSS"] > 0]
-                    short_df = top_abc_a[top_abc_a["GapToSS"] < 0]
-                    if not excess_df.empty:
-                        excess_units = excess_df["GapToSS"].sum()
-                        insights.append(f"- {len(excess_df)} A-class SKU(s) exceed safety stock by {format_magnitude(excess_units, ' units')}; adjust MINQTY releases or defer purchases.")
-                    if not short_df.empty:
-                        short_units = abs(short_df["GapToSS"].sum())
-                        insights.append(f"- {len(short_df)} A-class SKU(s) fall below safety stock by {format_magnitude(short_units, ' units')}; expedite supply or review lead times.")
+    if not top_abc_a.empty:
+        st.markdown("**Items covering ~80% of consumption value (Class A)**")
+        top_display = top_abc_a[display_cols]
+        top_formatters = {k: v for k, v in formatters.items() if k in top_display.columns}
+        st.dataframe(
+            top_display.style.format(top_formatters, na_rep="-"),
+            use_container_width=True
+        )
+        render_excel_download_button(
+            top_display,
+            "📥 Download ABC Class A (Excel)",
+            "inventory_abc_class_a",
+            key="download_abc_class_a",
+            sheet_name="ABC_Class_A"
+        )
 
-                insights.append(
-                    f"- Safety stock quantity computed as SSDays × ({next_month_series_name} ÷ 26). "
-                    "Align planning parameters (LT, MINQTY, SSDays) to control inventory levels."
-                )
+    st.caption(f"ABC analysis uses column '{next_month_series_name}' for next-month consumption.")
 
-                st.markdown("**Operational insights**")
-                for tip in insights:
-                    st.markdown(tip)
-
-                display_cols = group_columns + [
-                    "ConsumptionValue", "Share", "CumulativeShare", "ABC_Class",
-                    "NextMonthAPP", "SSQty", "GapToSS", "OH", "OH_value", "Cost"
-                ]
-                for optional_col in ["LT", "MINQTY", "SSDays"]:
-                    if optional_col in abc_summary.columns and optional_col not in display_cols:
-                        display_cols.append(optional_col)
-
-                abc_display = abc_summary[display_cols]
-                formatters = {
-                    "ConsumptionValue": "{:,.0f}",
-                    "Share": "{:.2%}",
-                    "CumulativeShare": "{:.2%}",
-                    "NextMonthAPP": "{:,.0f}",
-                    "SSQty": "{:,.0f}",
-                    "GapToSS": "{:,.0f}",
-                    "OH": "{:,.0f}",
-                    "OH_value": "{:,.0f}",
-                    "Cost": "{:,.2f}"
-                }
-                optional_formatters = {"LT": "{:,.0f}", "MINQTY": "{:,.0f}", "SSDays": "{:,.0f}"}
-                for key, fmt in optional_formatters.items():
-                    if key in abc_display.columns:
-                        formatters[key] = fmt
-
-                st.dataframe(
-                    abc_display.style.format(formatters, na_rep="-"),
-                    use_container_width=True
-                )
-                render_excel_download_button(
-                    abc_display,
-                    "📥 Download ABC Summary (Excel)",
-                    "inventory_abc_summary",
-                    key="download_abc_summary",
-                    sheet_name="ABC"
-                )
-
-                if not top_abc_a.empty:
-                    st.markdown("**Items covering ~80% of consumption value (Class A)**")
-                    top_display = top_abc_a[display_cols]
-                    top_formatters = {k: v for k, v in formatters.items() if k in top_display.columns}
-                    st.dataframe(
-                        top_display.style.format(top_formatters, na_rep="-"),
-                        use_container_width=True
-                    )
-                    render_excel_download_button(
-                        top_display,
-                        "📥 Download ABC Class A (Excel)",
-                        "inventory_abc_class_a",
-                        key="download_abc_class_a",
-                        sheet_name="ABC_Class_A"
-                    )
-
-                st.caption(f"ABC analysis uses column '{next_month_series_name}' for next-month consumption.")
+dioh_days, dioh_basis_label = render_inventory_dashboard()
+render_abc_analysis()
 
 # ===========================
 # 7. Summary Table
@@ -1498,6 +1511,7 @@ render_excel_download_button(
     key="download_detailed_table_excel",
     sheet_name="Inventory"
 )
+
 
 # ===========================
 # 11. Export Options
