@@ -808,8 +808,8 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None) -> None:
         fig.update_layout(title=title, height=420, hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
-    uploaded_file = st.file_uploader("Upload alternative FG XLSB file", type=["xlsb"])
-    fg_bytes = uploaded_file.getvalue() if uploaded_file else None
+    # Use FG file from sidebar
+    # fg_bytes is already defined in sidebar
     try:
         with st.spinner("Loading FG data..."):
             fg_df = load_fg_dataset(fg_bytes)
@@ -1462,15 +1462,9 @@ def render_bom_calculator(materials_df: pd.DataFrame) -> None:
         meta="Turn The Planning Up ⬆️💡⬆️",
         gradient="linear-gradient(120deg, #6a11cb 0%, #2575fc 100%)",
     )
-    bom_upload = st.file_uploader(
-        "⬆️ ارفع ملف BOM/Recipe",
-        type=["xlsx"],
-        key="bom_recipe_uploader",
-        help="ارفع ملف BOM/Recipe أو استخدم الملف الافتراضي إن وُجد.",
-    )
-
-    bom_bytes = bom_upload.getvalue() if bom_upload else None
-    using_default_bom = bom_upload is None
+    # Use BOM file from sidebar
+    # bom_bytes is already defined in sidebar
+    using_default_bom = uploaded_bom is None
 
     if using_default_bom:
         if BOM_DEFAULT_PATH.exists():
@@ -2107,29 +2101,65 @@ def load_calc_help(data_bytes: bytes | None = None, calc_bytes: bytes | None = N
 # ===========================
 # 1.a Data Source Selection
 # ===========================
-st.sidebar.header("📂 Data Source")
-uploaded_file = st.sidebar.file_uploader("Upload XLSB file", type=["xlsb"], help="Upload a replacement data file in XLSB format.")
-uploaded_bytes = uploaded_file.getvalue() if uploaded_file else None
-df = load_data(uploaded_bytes)
-if uploaded_file:
-    st.sidebar.success(f"Using uploaded file: {uploaded_file.name}")
-else:
-    st.sidebar.caption(f"Using default file: {DEFAULT_DATA_PATH.name}")
+st.sidebar.header("📂 Data Sources")
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("🧮 CalcHelp Guidance")
+# 1. Materials XLSB
+st.sidebar.subheader("📦 Materials Data")
+uploaded_materials = st.sidebar.file_uploader(
+    "Upload Materials XLSB",
+    type=["xlsb"],
+    help="Main materials inventory data file",
+    key="materials_uploader"
+)
+materials_bytes = uploaded_materials.getvalue() if uploaded_materials else None
+df = load_data(materials_bytes)
+if uploaded_materials:
+    st.sidebar.success(f"✓ {uploaded_materials.name}")
+else:
+    st.sidebar.caption(f"Using: {DEFAULT_DATA_PATH.name}")
+
+# 2. CalcHelp Sheet
+st.sidebar.subheader("🧮 CalcHelp Sheet")
 calc_help_file = st.sidebar.file_uploader(
-    "Upload CalcHelp sheet",
+    "Upload CalcHelp",
     type=["xlsb", "xlsx"],
-    help="Optional: override the CalcHelp sheet used for monthly inventory logic.",
+    help="Monthly inventory calculation logic",
     key="calc_help_uploader"
 )
 calc_help_bytes = calc_help_file.getvalue() if calc_help_file else None
-calc_help_df = load_calc_help(uploaded_bytes, calc_help_bytes)
+calc_help_df = load_calc_help(materials_bytes, calc_help_bytes)
 if calc_help_file:
-    st.sidebar.success(f"Using CalcHelp from: {calc_help_file.name}")
+    st.sidebar.success(f"✓ {calc_help_file.name}")
 else:
-    st.sidebar.caption("Using CalcHelp bundled with the active materials workbook.")
+    st.sidebar.caption("Using bundled CalcHelp")
+
+# 3. FG (Finished Goods) XLSB
+st.sidebar.subheader("🏷️ Finished Goods Data")
+uploaded_fg = st.sidebar.file_uploader(
+    "Upload FG XLSB",
+    type=["xlsb"],
+    help="Finished goods data for FG Explorer",
+    key="fg_uploader"
+)
+fg_bytes = uploaded_fg.getvalue() if uploaded_fg else None
+if uploaded_fg:
+    st.sidebar.success(f"✓ {uploaded_fg.name}")
+else:
+    st.sidebar.caption("Using default FG file")
+
+# 4. BOM/Recipe XLSX
+st.sidebar.subheader("📋 BOM & Recipe Data")
+uploaded_bom = st.sidebar.file_uploader(
+    "Upload BOM/Recipe XLSX",
+    type=["xlsx"],
+    help="Bill of Materials and Recipe data",
+    key="bom_uploader"
+)
+bom_bytes = uploaded_bom.getvalue() if uploaded_bom else None
+if uploaded_bom:
+    st.sidebar.success(f"✓ {uploaded_bom.name}")
+else:
+    st.sidebar.caption(f"Using: {BOM_DEFAULT_PATH.name}")
 
 st.sidebar.markdown("---")
 app_view = st.sidebar.radio(
