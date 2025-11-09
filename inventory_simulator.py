@@ -2783,13 +2783,41 @@ def _prioritize_candidates(candidate_list, preferred_suffix):
     return ordered
 
 
-def _resolve_month_demand(df_input, month_info, include_current_extras=False):
-    candidates = []
+def _resolve_month_demand(
+    df_input,
+    month_info,
+    include_current_extras: bool = False,
+    basis_preference: str | None = None,
+):
+    preferred_suffix = (basis_preference or "APP").upper()
+    fallback_suffix = "BP" if preferred_suffix == "APP" else "APP"
+
+    candidates: list[str] = []
+
     if include_current_extras:
-        candidates.extend(["CurAPP", "CurBP"])
-    candidates.extend(build_month_column_candidates(month_info, "APP", current_year_code))
-    candidates.extend(build_month_column_candidates(month_info, "BP", current_year_code))
-    prioritized = _prioritize_candidates(candidates, "APP")
+        extras_order = [preferred_suffix]
+        if fallback_suffix not in extras_order:
+            extras_order.append(fallback_suffix)
+        for suffix in extras_order:
+            candidates.append(f"Cur{suffix}")
+        # Ensure both APP/BP extras are available as absolute fallback
+        for suffix in ("APP", "BP"):
+            cur_label = f"Cur{suffix}"
+            if cur_label not in candidates:
+                candidates.append(cur_label)
+
+    suffix_sequence = [preferred_suffix]
+    if fallback_suffix not in suffix_sequence:
+        suffix_sequence.append(fallback_suffix)
+    # Always include APP/BP even if preference is something else
+    for suffix in ("APP", "BP"):
+        if suffix not in suffix_sequence:
+            suffix_sequence.append(suffix)
+
+    for suffix in suffix_sequence:
+        candidates.extend(build_month_column_candidates(month_info, suffix, current_year_code))
+
+    prioritized = _prioritize_candidates(candidates, preferred_suffix)
     resolved_col = resolve_existing_column(df_input, prioritized)
     if resolved_col is not None:
         series = pd.to_numeric(df_input[resolved_col], errors="coerce").fillna(0)
@@ -2799,10 +2827,13 @@ def _resolve_month_demand(df_input, month_info, include_current_extras=False):
 
 def build_requirement_plan(
     df_input,
+    basis: str | None = None,
     demand_columns: list[str] | None = None
 ):
     if df_input is None or df_input.empty:
         return []
+
+    preferred_basis = (basis or "APP").upper()
 
     demand_columns = [col for col in (demand_columns or []) if col in df_input.columns]
 
@@ -2822,7 +2853,8 @@ def build_requirement_plan(
             series, column_name = _resolve_month_demand(
                 df_input,
                 month_info,
-                include_current_extras=(idx == 0)
+                include_current_extras=(idx == 0),
+                basis_preference=preferred_basis,
             )
         plan.append({
             "month_idx": idx + 1,
