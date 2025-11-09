@@ -185,6 +185,44 @@ def load_fg_dataset(file_bytes: bytes | None) -> pd.DataFrame:
     return merged_df
 
 
+@st.cache_data(show_spinner=False)
+def load_ddates_sheet(file_bytes: bytes | None) -> pd.DataFrame:
+    """Load DDates sheet from FG workbook containing delivery dates and quantities."""
+    source = io.BytesIO(file_bytes) if file_bytes else FG_DEFAULT_FG_PATH
+    try:
+        ddates_df = pd.read_excel(source, sheet_name="DDates", engine="pyxlsb")
+    except FileNotFoundError:
+        raise
+    except ValueError:
+        # DDates sheet doesn't exist
+        return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+    
+    if ddates_df.empty:
+        return pd.DataFrame()
+    
+    # Normalize column names
+    ddates_df.columns = [str(col).strip() for col in ddates_df.columns]
+    
+    # Ensure ItemNumber is string
+    if "ItemNumber" in ddates_df.columns:
+        ddates_df["ItemNumber"] = ddates_df["ItemNumber"].astype(str).str.strip()
+    
+    # Ensure Qty is numeric
+    if "Qty" in ddates_df.columns:
+        ddates_df["Qty"] = pd.to_numeric(ddates_df["Qty"], errors="coerce")
+    
+    # Ensure Ddate is datetime
+    if "Ddate" in ddates_df.columns:
+        ddates_df["Ddate"] = pd.to_datetime(ddates_df["Ddate"], errors="coerce")
+    
+    # Drop rows with missing critical data
+    ddates_df = ddates_df.dropna(subset=["ItemNumber", "Qty", "Ddate"])
+    
+    return ddates_df
+
+
 def render_accent_subheader(text: str) -> None:
     st.markdown(
         f"""
@@ -808,6 +846,80 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
         fig.update_layout(title=title, height=420, hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
+    def _render_delivery_timeline(ddates_df: pd.DataFrame, selected_item: str) -> None:
+        """Render a timeline chart showing upcoming delivery dates and quantities for selected item."""
+        if ddates_df.empty:
+            st.info("📭 No delivery data available in DDates sheet.")
+            return
+        
+        # Normalize the selected item for comparison (handle leading zeros)
+        selected_item_normalized = _canonical_item_code(selected_item)
+        
+        # Normalize ItemNumber in ddates_df for comparison
+        ddates_df_normalized = ddates_df.copy()
+        ddates_df_normalized["ItemNumber_Canonical"] = ddates_df_normalized["ItemNumber"].apply(_canonical_item_code)
+        
+        # Filter for selected item using canonical comparison
+        item_deliveries = ddates_df_normalized[
+            ddates_df_normalized["ItemNumber_Canonical"] == selected_item_normalized
+        ].copy()
+        
+        if item_deliveries.empty:
+            # Show available items for debugging
+            available_items = ddates_df["ItemNumber"].unique()
+            st.info(f"📭 No delivery schedule found for item: {selected_item_normalized}")
+            with st.expander("🔍 Debug: Available items in DDates"):
+                st.write(f"Total items in DDates: {len(available_items)}")
+                st.write(f"Looking for: '{selected_item_normalized}'")
+                st.write("Sample items:", list(available_items[:10]))
+            return
+        
+        # Sort by date
+        item_deliveries = item_deliveries.sort_values("Ddate")
+        
+        # Create timeline chart
+        fig = go.Figure()
+        
+        # Add bar chart for quantities
+        fig.add_trace(
+            go.Bar(
+                x=item_deliveries["Ddate"],
+                y=item_deliveries["Qty"],
+                name="Delivery Quantity",
+                marker={"color": "#3498db"},
+                text=item_deliveries["Qty"].apply(lambda x: f"{x:,.0f}"),
+                textposition="outside",
+                hovertemplate="<b>Date:</b> %{x|%Y-%m-%d}<br><b>Quantity:</b> %{y:,.0f}<extra></extra>",
+            )
+        )
+        
+        # Update layout
+        fig.update_layout(
+            title="📦 Upcoming Delivery Schedule",
+            xaxis_title="Delivery Date",
+            yaxis_title="Quantity",
+            height=400,
+            hovermode="x unified",
+            showlegend=True,
+            xaxis=dict(
+                type="date",
+                tickformat="%Y-%m-%d",
+            ),
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Show data table
+        display_df = item_deliveries[["Ddate", "Qty"]].copy()
+        display_df["Ddate"] = display_df["Ddate"].dt.strftime("%Y-%m-%d")
+        display_df = display_df.rename(columns={"Ddate": "Delivery Date", "Qty": "Quantity"})
+        
+        st.dataframe(
+            display_df.style.format({"Quantity": "{:,.0f}"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+
     # Use FG file from sidebar
     # fg_bytes is already defined in sidebar
     try:
@@ -974,6 +1086,19 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
                 st.info("No matching items for this KPI.")
             else:
                 st.dataframe(detail_df, use_container_width=True)
+
+    # Show delivery timeline if a specific item is selected
+    if item_choice != "All" and item_display_to_value:
+        target_item = item_display_to_value.get(item_choice)
+        if target_item is not None:
+            st.markdown("---")
+            st.markdown("## 🚚 Delivery Schedule")
+            try:
+                ddates_df = load_ddates_sheet(fg_bytes)
+                _render_delivery_timeline(ddates_df, target_item)
+            except Exception as exc:
+                st.warning(f"⚠️ Could not load delivery data: {exc}")
+                st.info("Make sure the FG workbook contains a 'DDates' sheet with columns: ItemNumber, Qty, Ddate")
 
     aggregated_row = filtered_df.sum(numeric_only=True)
     weekly_labels, weekly_series = _build_weekly_series(aggregated_row)
@@ -2045,13 +2170,33 @@ def load_data(file_bytes: bytes | None = None):
     else:
         # Fallback if ItemNumber column doesn't exist
         df = df.dropna(how="all")
+    
+    # Track count before PurchTeam filter
+    count_before_filter = len(df)
+    
+    # Filter out items with PurchTeam = 0 or blank (keep items with text names)
+    if "PurchTeam" in df.columns:
+        # Convert to string and strip whitespace
+        df["PurchTeam"] = df["PurchTeam"].astype(str).str.strip()
+        # Keep only items where PurchTeam contains letters (a-z or A-Z)
+        df = df[df["PurchTeam"].str.contains(r'[a-zA-Z]', regex=True, na=False)].copy()
+    
     text_cols = ["ItemName", "Factory", "Storagetype", "Family", "RawType", "Unit"]
     for col in text_cols:
         if col in df.columns:
             df[col] = df[col].astype(str).fillna("")
 
     # Convert numeric columns and fill missing values with 0
-    numeric_cols = ["OH", "Cost", "Next3M", "MINQTY", "SSDays", "FixedSSQty"] 
+    numeric_cols = [
+        "OH",
+        "Cost",
+        "Next3M",
+        "MINQTY",
+        "SSDays",
+        "FixedSSQty",
+        "totalremQty",
+        "totalremValue",
+    ] 
     months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
     for m in months:
         numeric_cols += [f"{m}APP", f"{m}ST", f"{m}AS", f"{m}AP"]
@@ -2060,7 +2205,7 @@ def load_data(file_bytes: bytes | None = None):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    return df
+    return df, count_before_filter
 
 
 @st.cache_data
@@ -2114,19 +2259,30 @@ uploaded_materials = st.sidebar.file_uploader(
     key="materials_uploader"
 )
 materials_bytes = uploaded_materials.getvalue() if uploaded_materials else None
+initial_df_count = 0
 try:
-    df = load_data(materials_bytes)
+    df, initial_df_count = load_data(materials_bytes)
 except FileNotFoundError:
     df = pd.DataFrame()
-    st.sidebar.warning("⚠️ Default Materials file not found")
+    initial_df_count = 0
+    st.sidebar.warning("⚠️ Default Materials file not found at:")
+    st.sidebar.caption(f"`{DEFAULT_DATA_PATH}`")
 except Exception as exc:
     df = pd.DataFrame()
+    initial_df_count = 0
     st.sidebar.error(f"Error loading Materials: {exc}")
 
 if uploaded_materials:
     st.sidebar.success(f"✓ {uploaded_materials.name}")
+    if initial_df_count > 0:
+        st.sidebar.caption(f"Loaded {initial_df_count:,} items")
+        if len(df) < initial_df_count:
+            st.sidebar.caption(f"⚠️ {initial_df_count - len(df):,} items filtered out (PurchTeam=0)")
 elif not df.empty:
-    st.sidebar.caption(f"Using: {DEFAULT_DATA_PATH.name}")
+    st.sidebar.success(f"✓ Using default: {DEFAULT_DATA_PATH.name}")
+    st.sidebar.caption(f"Loaded {initial_df_count:,} items")
+    if len(df) < initial_df_count:
+        st.sidebar.caption(f"⚠️ {initial_df_count - len(df):,} items filtered out (PurchTeam=0)")
 
 # 2. CalcHelp Sheet
 st.sidebar.subheader("🧮 CalcHelp Sheet")
@@ -2444,17 +2600,24 @@ def resolve_existing_column(df_input, candidates):
 # ===========================
 today = datetime.now()
 months_sequence = []
-for i in range(12):
-    target_date = today + relativedelta(months=i)
+
+end_year = 2026
+end_month = 12
+
+cursor = today.replace(day=1)
+while cursor.year < end_year or (cursor.year == end_year and cursor.month <= end_month):
     months_sequence.append(
         {
-            "code": target_date.strftime("%b%y"),
-            "name": target_date.strftime("%b"),
-            "year": target_date.strftime("%y"),
-            "full_date": target_date,
-            "year_tag": "CY" if target_date.year == today.year else "NY"
+            "code": cursor.strftime("%b%y"),
+            "name": cursor.strftime("%b"),
+            "full_date": cursor,
+            "month": cursor.month,
+            "year": cursor.year,
+            "year_tag": "CY" if cursor.year == today.year else "NY"
         }
     )
+    cursor += relativedelta(months=1)
+
 current_month_idx = 0  # Index for the current month using AS and AP
 current_year_code = today.strftime("%y")
 
@@ -2478,7 +2641,7 @@ def _prioritize_candidates(candidate_list, preferred_suffix):
 
 def get_requirement_series(df_input, month_info, basis="APP", include_current_extras=False):
     basis = basis.upper()
-    candidates = build_month_column_candidates(month_info, "APP", current_year_code)
+    candidates = build_month_column_candidates(month_info, basis, current_year_code)
     extras = []
     if include_current_extras:
         extras = [f"Cur{basis}"]
@@ -2487,24 +2650,47 @@ def get_requirement_series(df_input, month_info, basis="APP", include_current_ex
     combined_candidates = extras + candidates
     prioritized = _prioritize_candidates(combined_candidates, basis)
     resolved_col = resolve_existing_column(df_input, prioritized)
+    if resolved_col is None:
+        fallback_basis = "BP" if basis == "APP" else "APP"
+        fallback_candidates = build_month_column_candidates(month_info, fallback_basis, current_year_code)
+        combined_fallback = extras + fallback_candidates
+        prioritized_fallback = _prioritize_candidates(combined_fallback, fallback_basis)
+        resolved_col = resolve_existing_column(df_input, prioritized_fallback)
     if resolved_col is not None:
         series = pd.to_numeric(df_input[resolved_col], errors="coerce").fillna(0)
         return series, str(resolved_col)
     return pd.Series(0, index=df_input.index, dtype=float), None
 
 
-def build_requirement_plan(df_input, basis="APP"):
+def build_requirement_plan(
+    df_input,
+    basis="APP",
+    demand_columns: list[str] | None = None
+):
     if df_input is None or df_input.empty:
         return []
 
+    demand_columns = [col for col in (demand_columns or []) if col in df_input.columns]
+
     plan = []
     for idx, month_info in enumerate(months_sequence):
-        series, column_name = get_requirement_series(
-            df_input,
-            month_info,
-            basis=basis,
-            include_current_extras=(idx == 0)
-        )
+        column_name: str | None
+
+        if demand_columns and idx < len(demand_columns):
+            resolved = resolve_existing_column(df_input, [demand_columns[idx]])
+            if resolved is not None:
+                series = pd.to_numeric(df_input[resolved], errors="coerce").fillna(0)
+                column_name = str(resolved)
+            else:
+                series = pd.Series(0, index=df_input.index, dtype=float)
+                column_name = demand_columns[idx]
+        else:
+            series, column_name = get_requirement_series(
+                df_input,
+                month_info,
+                basis=basis,
+                include_current_extras=(idx == 0)
+            )
         plan.append({
             "month_idx": idx + 1,
             "month": month_info,
@@ -2545,13 +2731,13 @@ def build_existing_supply_plan(df_input):
     return plan
 
 
-def compute_static_ss_reference(df_input, bases):
+def compute_static_ss_reference(df_input, bases, demand_columns: list[str] | None = None):
     if df_input is None or df_input.empty or not bases:
         return None
 
     aggregate_series = []
     for basis in bases:
-        basis_plan = build_requirement_plan(df_input, basis=basis)
+        basis_plan = build_requirement_plan(df_input, basis=basis, demand_columns=demand_columns)
         if not basis_plan:
             continue
         monthly_series = [entry["series"] for entry in basis_plan if not entry["series"].empty]
@@ -2615,6 +2801,7 @@ def compute_supply_schedule(
     cost_series = schedule_df["Cost"].astype(float)
 
     zero_series = pd.Series(0, index=schedule_df.index, dtype=float)
+    minqty_carryover = pd.Series(0, index=schedule_df.index, dtype=float)
 
     if ss_mode.lower() == "static" and static_reference is not None:
         static_reference = pd.to_numeric(static_reference, errors="coerce").reindex(schedule_df.index).fillna(0)
@@ -2644,6 +2831,7 @@ def compute_supply_schedule(
         calculated_ss = ((ssdays_series + buffer_days) * ss_base / 26.0) * safety_multiplier
         ss_qty = calculated_ss.where(fixed_ss_series <= 0, fixed_ss_series)
         ss_qty = ss_qty.fillna(0)
+        zero_ss_mask = ss_qty.le(0)
 
         pre_scheduled_supply = existing_supply_map.get(month_idx, zero_series)
         pre_scheduled_supply = pre_scheduled_supply.astype(float).fillna(0)
@@ -2656,21 +2844,42 @@ def compute_supply_schedule(
         season_mask = season_windows.apply(lambda window: is_month_in_season(calendar_month, window))
         supply_candidate = unmet_requirement.where(season_mask, 0).copy()
 
+        if not round_to_minqty and zero_ss_mask.any():
+            demand_shortfall = (demand_series - available_stock).clip(lower=0)
+            demand_shortfall = demand_shortfall.where(season_mask, 0)
+            supply_candidate.loc[zero_ss_mask] = demand_shortfall.loc[zero_ss_mask]
+
         if round_to_minqty:
+            remaining_need = supply_candidate.copy()
+
+            if not minqty_carryover.empty:
+                coverage = np.minimum(remaining_need, minqty_carryover)
+                coverage = coverage.fillna(0)
+                remaining_need = (remaining_need - coverage).clip(lower=0)
+                minqty_carryover = (minqty_carryover - coverage).clip(lower=0)
+
             minqty_positive = minqty_series.where(minqty_series > 0)
-            valid_mask = supply_candidate.gt(0) & minqty_positive.notna()
-            if valid_mask.any():
-                supply_candidate.loc[valid_mask] = (
+            need_mask = remaining_need.gt(0) & minqty_positive.notna()
+            rounded_supply = remaining_need.copy()
+            if need_mask.any():
+                rounded_supply.loc[need_mask] = (
                     np.ceil(
-                        (supply_candidate[valid_mask] / minqty_positive[valid_mask]).replace([np.inf, -np.inf], 0)
-                    ) * minqty_positive[valid_mask]
+                        (remaining_need[need_mask] / minqty_positive[need_mask]).replace([np.inf, -np.inf], 0)
+                    ) * minqty_positive[need_mask]
                 )
+
+            rounding_excess = (rounded_supply - remaining_need).clip(lower=0)
+            minqty_carryover = (minqty_carryover + rounding_excess).fillna(0)
+            supply_candidate = rounded_supply
+
         seasonal_supply = supply_candidate.fillna(0)
 
         total_supply = pre_scheduled_supply + seasonal_supply
         available_post_supply = available_stock + seasonal_supply
         closing_stock = (available_post_supply - demand_series).clip(lower=0)
         seasonal_backlog = (total_requirement - available_post_supply).clip(lower=0)
+        if not round_to_minqty and zero_ss_mask.any():
+            seasonal_backlog.loc[zero_ss_mask] = 0
 
         demand_value = demand_series * cost_series
         closing_value = closing_stock * cost_series
@@ -2722,22 +2931,42 @@ st.sidebar.header("🔍 Filters")
 
 # Check if Materials data is loaded
 if df.empty:
-    st.sidebar.info("📦 Please upload Materials data to use filters")
+    if initial_df_count > 0:
+        st.sidebar.warning("⚠️ All items filtered out (PurchTeam=0)")
+        st.sidebar.info("No items available with valid PurchTeam values")
+    else:
+        st.sidebar.info("📦 Please upload Materials data to use filters")
     df_filtered = df.copy()
     search_active = False
 else:
     # SKU search (temporarily disables other filters)
-    search_options = [f"{str(row['ItemNumber']).zfill(6)} - {row['ItemName']}" 
-                      for _, row in df[["ItemNumber","ItemName"]].drop_duplicates().iterrows()]
-    item_search = st.sidebar.selectbox("Search for SKU", options=[""]+sorted(search_options))
+    all_search_options = [f"{str(row['ItemNumber']).zfill(6)} - {row['ItemName']}" 
+                          for _, row in df[["ItemNumber","ItemName"]].drop_duplicates().iterrows()]
+    all_search_options_sorted = sorted(all_search_options)
+    
+    # Add text input to filter the SKU list
+    search_filter = st.sidebar.text_input("🔍 Filter SKU list (type to search)", placeholder="Type item number or name...")
+    
+    # Filter options based on search text
+    if search_filter:
+        filtered_options = [opt for opt in all_search_options_sorted 
+                           if search_filter.lower() in opt.lower()]
+    else:
+        filtered_options = all_search_options_sorted
+    
+    item_search = st.sidebar.multiselect(
+        "Select SKU(s)", 
+        options=filtered_options,
+        help="Select one or more SKUs to analyze"
+    )
 
     df_filtered = df.copy()
     search_active = False
     if item_search:
         search_active = True
-        item_code = item_search.split(" - ")[0]
-        df_filtered = df_filtered[df_filtered["ItemNumber"]==item_code]
-        st.sidebar.success("✅ SKU selected")
+        item_codes = [item.split(" - ")[0] for item in item_search]
+        df_filtered = df_filtered[df_filtered["ItemNumber"].isin(item_codes)]
+        st.sidebar.success(f"✅ {len(item_search)} SKU(s) selected")
 
     # Other filters
     if not search_active:
@@ -2958,7 +3187,7 @@ def render_inventory_dashboard():
         2. Optionally upload CalcHelp, FG, and BOM files
         3. Use filters to analyze your inventory
         """)
-        return
+        return None, None
 
     # استخدام الفاصلة للألوف في الأرقام
     col1,col2,col3,col4,col5 = st.columns(5)
@@ -3258,37 +3487,43 @@ render_abc_analysis()
 # 7. Summary Table
 # ===========================
 if not search_active:
-    grouping_cols = ["Factory","Storagetype","Family","RawType"]
-    summary_base = df_filtered.copy()
-    summary_base["OH_value"] = summary_base["OH"] * summary_base["Cost"]
-    summary = summary_base.groupby(grouping_cols, as_index=False).agg({
-        "ItemNumber": "nunique",
-        "OH_value": "sum"
-    }).rename(columns={"ItemNumber": "Unique SKUs"})
+    # Only use grouping columns that exist in the dataframe
+    potential_grouping_cols = ["Factory","Storagetype","Family","RawType"]
+    grouping_cols = [col for col in potential_grouping_cols if col in df_filtered.columns]
+    
+    if grouping_cols and not df_filtered.empty:
+        summary_base = df_filtered.copy()
+        summary_base["OH_value"] = summary_base["OH"] * summary_base["Cost"]
+        summary = summary_base.groupby(grouping_cols, as_index=False).agg({
+            "ItemNumber": "nunique",
+            "OH_value": "sum"
+        }).rename(columns={"ItemNumber": "Unique SKUs"})
 
-    month1_values = df_with_months.groupby(grouping_cols, as_index=False)[["Month_1_value"]].sum()
-    summary = summary.merge(month1_values, on=grouping_cols, how="left")
-    summary = summary.rename(columns={
-        "OH_value": "OH Value (EGP)",
-        "Month_1_value": "Month_1 Value (EGP)"
-    })
-    summary["Month_1 Value (EGP)"] = summary["Month_1 Value (EGP)"].fillna(0)
+        month1_values = df_with_months.groupby(grouping_cols, as_index=False)[["Month_1_value"]].sum()
+        summary = summary.merge(month1_values, on=grouping_cols, how="left")
+        summary = summary.rename(columns={
+            "OH_value": "OH Value (EGP)",
+            "Month_1_value": "Month_1 Value (EGP)"
+        })
+        summary["Month_1 Value (EGP)"] = summary["Month_1 Value (EGP)"].fillna(0)
 
-    st.dataframe(
-        summary.style.format({
-            "Unique SKUs": "{:,.0f}",
-            "OH Value (EGP)": "{:,.0f}",
-            "Month_1 Value (EGP)": "{:,.0f}"
-        }),
-        use_container_width=True
-    )
-    render_excel_download_button(
-        summary,
-        "📥 Download Summary (Excel)",
-        "inventory_summary",
-        key="download_summary_excel",
-        sheet_name="Summary"
-    )
+        st.dataframe(
+            summary.style.format({
+                "Unique SKUs": "{:,.0f}",
+                "OH Value (EGP)": "{:,.0f}",
+                "Month_1 Value (EGP)": "{:,.0f}"
+            }),
+            use_container_width=True
+        )
+        render_excel_download_button(
+            summary,
+            "📥 Download Summary (Excel)",
+            "inventory_summary",
+            key="download_summary_excel",
+            sheet_name="Summary"
+        )
+    else:
+        st.info("📊 Summary table requires grouping columns (Factory, Storagetype, Family, RawType) to be present in the data.")
 
 # ===========================
 # 8. Supply Planning Scenarios
@@ -3296,7 +3531,23 @@ if not search_active:
 st.markdown("---")
 st.subheader("🚚 Supply Scheduling to Protect Safety Stock")
 
+selected_demand_columns: list[str] = []
+
 with st.expander("Configure supply planning scenario", expanded=False):
+    demand_column_candidates = [
+        col for col in df_filtered.columns
+        if isinstance(col, str) and (re.match(r"^[A-Za-z]{3}", col) or col.startswith("Cur"))
+    ]
+
+    if demand_column_candidates:
+        default_demand_selection = demand_column_candidates[:len(months_sequence)]
+        selected_demand_columns = st.multiselect(
+            "Demand columns (use order shown)",
+            options=demand_column_candidates,
+            default=default_demand_selection,
+            help="Choose which columns supply planning should treat as monthly demand."
+        )
+
     col_basis, col_ssmult, col_buffer, col_round = st.columns([2,2,2,2])
 
     with col_basis:
@@ -3359,14 +3610,22 @@ with st.expander("Configure supply planning scenario", expanded=False):
 
     st.caption(
         "Supply calculations use the filtered dataset only. Safety stock target is SSDays × demand/26. "
-        "Demand basis columns are resolved dynamically based on the selected APP/BP preference."
+        "Demand comes from your selected columns when provided, otherwise from the chosen APP/BP basis."
     )
 
-requirement_plan = build_requirement_plan(df_filtered, basis=supply_basis)
+requirement_plan = build_requirement_plan(
+    df_filtered,
+    basis=supply_basis,
+    demand_columns=selected_demand_columns or None
+)
 ss_reference_series = None
 ss_mode_key = "dynamic"
 if ss_mode == "Static average" and static_basis_options:
-    ss_reference_series = compute_static_ss_reference(df_filtered, bases=static_basis_options)
+    ss_reference_series = compute_static_ss_reference(
+        df_filtered,
+        bases=static_basis_options,
+        demand_columns=selected_demand_columns or None
+    )
     ss_mode_key = "static"
 
 existing_supply_plan = build_existing_supply_plan(df_filtered) if use_existing_supply else None
@@ -3383,7 +3642,26 @@ schedule_detail, schedule_summary = compute_supply_schedule(
 )
 
 if schedule_summary.empty:
-    st.info("Insufficient data to produce a supply schedule for the current filters.")
+    st.warning("⚠️ Insufficient data to produce a supply schedule for the current filters.")
+    st.markdown("""
+    ### Possible reasons:
+    - **No items match your filters** - Try adjusting or removing filters
+    - **PurchTeam = 0 items excluded** - Items with PurchTeam = 0 are automatically filtered out
+    - **Missing required columns** - Check that your Materials file has APP/BP columns for future months
+    - **No demand data** - Ensure your data includes monthly demand forecasts
+    
+    ### Troubleshooting:
+    1. Check the "Filtered SKUs" count in the dashboard above
+    2. If it shows 0 or very few items, adjust your filters
+    3. Verify your Materials file includes the required columns
+    """)
+    
+    # Show diagnostic info
+    with st.expander("🔍 Diagnostic Information"):
+        st.write(f"**Filtered items count:** {len(df_filtered)}")
+        st.write(f"**Items with months data:** {len(df_with_months)}")
+        if not df_filtered.empty:
+            st.write(f"**Available columns:** {', '.join(df_filtered.columns.tolist()[:20])}...")
 else:
     display_mode = st.radio(
         "Display mode",
@@ -3394,6 +3672,114 @@ else:
     )
 
     is_value_mode = display_mode == "Value"
+
+    with st.expander("🔍 Demand source diagnostics", expanded=False):
+        demand_debug_rows = []
+        for entry in requirement_plan:
+            series = entry.get("series")
+            demand_debug_rows.append(
+                {
+                    "Month": entry.get("month", {}).get("code"),
+                    "Resolved column": entry.get("source_column"),
+                    "Demand (sum)": float(series.sum()) if isinstance(series, pd.Series) else np.nan,
+                }
+            )
+        if demand_debug_rows:
+            debug_df = pd.DataFrame(demand_debug_rows)
+            st.dataframe(debug_df, use_container_width=True)
+        else:
+            st.info("No demand rows available for the current selection.")
+
+    if (
+        search_active
+        and item_search
+        and len(item_search) == 1
+        and "Season" in df_filtered.columns
+    ):
+        selected_code_raw = item_search[0].split(" - ")[0].strip()
+        selected_code = _canonical_item_code(selected_code_raw)
+
+        seasonal_candidates = df_filtered.copy()
+        seasonal_candidates["__canonical_item"] = seasonal_candidates["ItemNumber"].apply(_canonical_item_code)
+        season_values = seasonal_candidates.loc[
+            seasonal_candidates["__canonical_item"] == selected_code, "Season"
+        ]
+
+        if not season_values.empty:
+            cleaned_seasons = (
+                season_values.astype(str).str.strip().replace({"nan": ""})
+            )
+            cleaned_seasons = cleaned_seasons[cleaned_seasons.ne("")]
+            if not cleaned_seasons.empty:
+                unique_windows = sorted({value for value in cleaned_seasons})
+                season_text = ", ".join(unique_windows)
+                st.warning(
+                    f"🌤️ **Seasonal SKU selected.** Seasonal window: {season_text}. "
+                    "Supply outside this window may be constrained."
+                )
+
+    totalrem_qty_sum = None
+    totalrem_value_sum = None
+    if "totalremQty" in df_filtered.columns:
+        totalrem_qty_series = pd.to_numeric(df_filtered["totalremQty"], errors="coerce").fillna(0)
+        totalrem_qty_sum = float(totalrem_qty_series.sum())
+
+        cost_series = (
+            pd.to_numeric(df_filtered.get("Cost", 0), errors="coerce").fillna(0)
+            if "Cost" in df_filtered.columns
+            else pd.Series(0, index=totalrem_qty_series.index)
+        )
+        totalrem_value_sum = float((totalrem_qty_series * cost_series).sum())
+
+    oh_qty_sum = None
+    oh_value_sum = None
+    if "OH" in df_filtered.columns:
+        oh_series = pd.to_numeric(df_filtered["OH"], errors="coerce").fillna(0)
+        oh_qty_sum = float(oh_series.sum())
+
+        cost_series = (
+            pd.to_numeric(df_filtered.get("Cost", 0), errors="coerce").fillna(0)
+            if "Cost" in df_filtered.columns
+            else pd.Series(0, index=oh_series.index)
+        )
+        oh_value_sum = float((oh_series * cost_series).sum())
+
+    metric_rows = []
+    if totalrem_qty_sum is not None:
+        metric_rows.append(
+            (
+                "📦 totalremQty (from data)",
+                format_magnitude(totalrem_qty_sum, " units"),
+            )
+        )
+        if totalrem_value_sum is not None:
+            metric_rows.append(
+                (
+                    "💰 totalremQty value",
+                    format_magnitude(totalrem_value_sum, " EGP"),
+                )
+            )
+
+    if oh_qty_sum is not None:
+        metric_rows.append(
+            (
+                "🏭 OH quantity (selected items)",
+                format_magnitude(oh_qty_sum, " units"),
+            )
+        )
+        if oh_value_sum is not None:
+            metric_rows.append(
+                (
+                    "💵 OH value (selected items)",
+                    format_magnitude(oh_value_sum, " EGP"),
+                )
+            )
+
+    if metric_rows:
+        cols = st.columns(len(metric_rows))
+        for col, (label, value) in zip(cols, metric_rows):
+            with col:
+                st.metric(label, value)
 
     # DIOH indicators for supply view (always quantity-based)
     summary_sorted = schedule_summary.sort_values("month_idx").reset_index(drop=True)
@@ -3425,6 +3811,110 @@ else:
             st.markdown(f"🔄 **Planned DIOH{label_suffix}:** {planned_dioh_days:,.1f} days")
         else:
             st.markdown("🔄 **Planned DIOH:** —")
+
+    # Show totals before the chart
+    st.markdown("---")
+    st.markdown("### 📊 Totals Summary")
+    totals_cols = st.columns(5)
+    
+    if "month_idx" in schedule_summary.columns:
+        sorted_summary = schedule_summary.sort_values("month_idx")
+    else:
+        sorted_summary = schedule_summary.copy()
+
+    month_count = len(sorted_summary) if not sorted_summary.empty else 0
+
+    if is_value_mode:
+        total_demand_value = schedule_summary["DemandValue"].sum()
+        total_supply_value = schedule_summary["SupplyValue"].sum()
+        remaining_value = total_supply_value - total_demand_value
+        final_closing_value = (
+            sorted_summary.iloc[-1]["ClosingValue"]
+            if month_count and "ClosingValue" in sorted_summary.columns
+            else np.nan
+        )
+        average_demand_value = total_demand_value / month_count if month_count else np.nan
+        average_supply_value = total_supply_value / month_count if month_count else np.nan
+        average_closing_value = (
+            sorted_summary["ClosingValue"].mean()
+            if month_count and "ClosingValue" in sorted_summary.columns
+            else np.nan
+        )
+        
+        with totals_cols[0]:
+            st.metric("📊 Total year demand", format_magnitude(total_demand_value, " EGP"))
+        with totals_cols[1]:
+            st.metric("📦 Total year supply", format_magnitude(total_supply_value, " EGP"))
+        with totals_cols[2]:
+            st.metric("💰 Total Remaining Qty", format_magnitude(remaining_value, " EGP"))
+        with totals_cols[3]:
+            st.metric("🏁 Projected closing value", format_magnitude(final_closing_value, " EGP"))
+        with totals_cols[4]:
+            st.info(
+                "\n".join(
+                    [
+                        f"**Total Remaining:**",
+                        format_magnitude(remaining_value, " EGP"),
+                        "",
+                        "This is the PRs Remaining",
+                    ]
+                )
+            )
+
+        if month_count:
+            avg_cols = st.columns(3)
+            with avg_cols[0]:
+                st.metric("📊 Avg monthly demand", format_magnitude(average_demand_value, " EGP"))
+            with avg_cols[1]:
+                st.metric("📦 Avg monthly supply", format_magnitude(average_supply_value, " EGP"))
+            with avg_cols[2]:
+                st.metric("🏁 Avg monthly closing", format_magnitude(average_closing_value, " EGP"))
+    else:
+        total_demand_qty = schedule_summary["DemandQty"].sum()
+        total_supply_qty = schedule_summary["SupplyQty"].sum()
+        total_closing_qty = schedule_summary["ClosingQty"].sum()
+        remaining_qty = total_supply_qty - total_demand_qty
+        final_closing_qty = (
+            sorted_summary.iloc[-1]["ClosingQty"]
+            if month_count and "ClosingQty" in sorted_summary.columns
+            else np.nan
+        )
+        average_demand_qty = total_demand_qty / month_count if month_count else np.nan
+        average_supply_qty = total_supply_qty / month_count if month_count else np.nan
+        average_closing_qty = (
+            sorted_summary["ClosingQty"].mean()
+            if month_count and "ClosingQty" in sorted_summary.columns
+            else np.nan
+        )
+        
+        with totals_cols[0]:
+            st.metric("📊 Total year demand", format_magnitude(total_demand_qty, " units"))
+        with totals_cols[1]:
+            st.metric("📦 Total year supply", format_magnitude(total_supply_qty, " units"))
+        with totals_cols[2]:
+            st.metric("📈 Total Remaining Qty", format_magnitude(remaining_qty, " units"))
+        with totals_cols[3]:
+            st.metric("🏁 Projected closing stock", format_magnitude(final_closing_qty, " units"))
+        with totals_cols[4]:
+            st.info(
+                "\n".join(
+                    [
+                        f"**Total Remaining Qty:**",
+                        format_magnitude(remaining_qty, " units"),
+                        "",
+                        "This is the PRs Remaining",
+                    ]
+                )
+            )
+
+        if month_count:
+            avg_cols = st.columns(3)
+            with avg_cols[0]:
+                st.metric("📊 Avg monthly demand", format_magnitude(average_demand_qty, " units"))
+            with avg_cols[1]:
+                st.metric("📦 Avg monthly supply", format_magnitude(average_supply_qty, " units"))
+            with avg_cols[2]:
+                st.metric("🏁 Avg monthly closing", format_magnitude(average_closing_qty, " units"))
 
     st.markdown("### Supply vs Demand Trajectory")
     supply_chart = go.Figure()
@@ -3518,15 +4008,6 @@ else:
             sheet_name="Scenario"
         )
 
-    with scenario_cols[1]:
-        st.markdown("#### Totals")
-        if is_value_mode:
-            st.metric("Total supply value", format_magnitude(schedule_summary["SupplyValue"].sum(), " EGP"))
-            st.metric("Projected closing value", format_magnitude(schedule_summary["ClosingValue"].sum(), " EGP"))
-        else:
-            st.metric("Total planned supply", format_magnitude(schedule_summary["SupplyQty"].sum(), " units"))
-            st.metric("Projected closing stock", format_magnitude(schedule_summary["ClosingQty"].sum(), " units"))
-
     st.markdown("### Detailed Supply Plan")
     base_columns = [col for col in [
         "ItemNumber", "ItemName", "Unit", "Factory", "Month_0"
@@ -3568,79 +4049,89 @@ else:
 st.markdown("---")
 st.subheader("📋 Detailed Table")
 
-# Columns required for calculations
-detail_cols = ["ItemNumber","ItemName","Factory","Storagetype","Family","RawType","Cost","Month_0","Month_0_value","MINQTY","FixedSSQty","SSDays"]
-rename_dict = {
-    "ItemNumber":"SKU Code","ItemName":"Item Name","Factory":"Factory","Storagetype":"Storage Type",
-    "Family":"Family","RawType":"Raw Material Type","Cost":"Cost (EGP)",
-    "Month_0":"OH (Quantity)","Month_0_value":"OH (EGP)",
-    "MINQTY":"Minimum Lot (MINQTY)","FixedSSQty":"Fixed SS Qty","SSDays":"SS Days"
-}
+if df_with_months.empty:
+    st.info("📊 No data available to display in detailed table. Please check your filters and data source.")
+else:
+    # Columns required for calculations
+    detail_cols = ["ItemNumber","ItemName","Factory","Storagetype","Family","RawType","Cost","Month_0","Month_0_value","MINQTY","FixedSSQty","SSDays"]
+    rename_dict = {
+        "ItemNumber":"SKU Code","ItemName":"Item Name","Factory":"Factory","Storagetype":"Storage Type",
+        "Family":"Family","RawType":"Raw Material Type","Cost":"Cost (EGP)",
+        "Month_0":"OH (Quantity)","Month_0_value":"OH (EGP)",
+        "MINQTY":"Minimum Lot (MINQTY)","FixedSSQty":"Fixed SS Qty","SSDays":"SS Days"
+    }
 
-if time_grouping=="Monthly":
-    for i,m in enumerate(months_sequence):
-        detail_cols += [f"Month_{i+1}",f"Month_{i+1}_value"]
-        rename_dict[f"Month_{i+1}"] = f"{m['code']} (Quantity)"
-        rename_dict[f"Month_{i+1}_value"] = f"{m['code']} (EGP)"
-elif time_grouping=="Quarterly":
-    # Use quarter closing values (end of each quarter)
-    detail_cols += ["Month_3","Month_3_value","Month_6","Month_6_value","Month_9","Month_9_value","Month_12","Month_12_value"]
-    rename_dict.update({
-        "Month_3":"Q1 Close (Quantity)","Month_3_value":"Q1 Close (EGP)",
-        "Month_6":"Q2 Close (Quantity)","Month_6_value":"Q2 Close (EGP)",
-        "Month_9":"Q3 Close (Quantity)","Month_9_value":"Q3 Close (EGP)",
-        "Month_12":"Q4 Close (Quantity)","Month_12_value":"Q4 Close (EGP)"
-    })
-else:  # Yearly
-    # Use year-end closing values
-    detail_cols += ["Month_12","Month_12_value"]
-    rename_dict.update({
-        "Month_12":"Year Close (Quantity)","Month_12_value":"Year Close (EGP)"
-    })
+    if time_grouping=="Monthly":
+        for i,m in enumerate(months_sequence):
+            detail_cols += [f"Month_{i+1}",f"Month_{i+1}_value"]
+            rename_dict[f"Month_{i+1}"] = f"{m['code']} (Quantity)"
+            rename_dict[f"Month_{i+1}_value"] = f"{m['code']} (EGP)"
+    elif time_grouping=="Quarterly":
+        # Use quarter closing values (end of each quarter)
+        detail_cols += ["Month_3","Month_3_value","Month_6","Month_6_value","Month_9","Month_9_value","Month_12","Month_12_value"]
+        rename_dict.update({
+            "Month_3":"Q1 Close (Quantity)","Month_3_value":"Q1 Close (EGP)",
+            "Month_6":"Q2 Close (Quantity)","Month_6_value":"Q2 Close (EGP)",
+            "Month_9":"Q3 Close (Quantity)","Month_9_value":"Q3 Close (EGP)",
+            "Month_12":"Q4 Close (Quantity)","Month_12_value":"Q4 Close (EGP)"
+        })
+    else:  # Yearly
+        # Use year-end closing values
+        detail_cols += ["Month_12","Month_12_value"]
+        rename_dict.update({
+            "Month_12":"Year Close (Quantity)","Month_12_value":"Year Close (EGP)"
+        })
 
-df_display = df_with_months[detail_cols].rename(columns=rename_dict)
+    # Only use columns that exist in df_with_months
+    available_cols = [col for col in detail_cols if col in df_with_months.columns]
+    
+    if not available_cols:
+        st.warning("⚠️ Required columns are missing from the data. Please check your data source.")
+    else:
+        df_display = df_with_months[available_cols].rename(columns=rename_dict)
 
-st.dataframe(
-    # Format numeric columns with thousands separators
-    df_display.style.format({
-        col:"{:,.0f}" if "Quantity" in col or "OH (Quantity)" in col else "{:,.2f}"
-        for col in df_display.columns if col not in ["SKU Code","Item Name","Factory","Storage Type","Family","Raw Material Type"]
-    }).format({
-        "SKU Code": lambda x: str(x).zfill(6) if pd.notna(x) and str(x).isdigit() else str(x)
-    }),
-    use_container_width=True,
-    height=400
-)
+        st.dataframe(
+            # Format numeric columns with thousands separators
+            df_display.style.format({
+                col:"{:,.0f}" if "Quantity" in col or "OH (Quantity)" in col else "{:,.2f}"
+                for col in df_display.columns if col not in ["SKU Code","Item Name","Factory","Storage Type","Family","Raw Material Type"]
+            }).format({
+                "SKU Code": lambda x: str(x).zfill(6) if pd.notna(x) and str(x).isdigit() else str(x)
+            }),
+            use_container_width=True,
+            height=400
+        )
 
-render_excel_download_button(
-    df_display,
-    "📥 Download Detailed Table (Excel)",
-    "inventory_simulation",
-    key="download_detailed_table_excel",
-    sheet_name="Inventory"
-)
+        render_excel_download_button(
+            df_display,
+            "📥 Download Detailed Table (Excel)",
+            "inventory_simulation",
+            key="download_detailed_table_excel",
+            sheet_name="Inventory"
+        )
 
 
 # ===========================
 # 11. Export Options
 # ===========================
-st.markdown("---")
-col_export1,col_export2,col_export3 = st.columns([2,2,1])
+if not df_with_months.empty and 'df_display' in locals():
+    st.markdown("---")
+    col_export1,col_export2,col_export3 = st.columns([2,2,1])
 
-with col_export1:
-    render_excel_download_button(
-        df_display,
-        "📥 Download Excel",
-        "inventory_simulation",
-        key="download_detailed_table_excel_sidebar",
-        sheet_name="Inventory"
-    )
+    with col_export1:
+        render_excel_download_button(
+            df_display,
+            "📥 Download Excel",
+            "inventory_simulation",
+            key="download_detailed_table_excel_sidebar",
+            sheet_name="Inventory"
+        )
 
-    st.download_button("📥 Download CSV", data=df_display.to_csv(index=False,encoding="utf-8-sig"),
-                       file_name=f"inventory_simulation_{today.strftime('%Y%m%d')}.csv", mime="text/csv")
+        st.download_button("📥 Download CSV", data=df_display.to_csv(index=False,encoding="utf-8-sig"),
+                           file_name=f"inventory_simulation_{today.strftime('%Y%m%d')}.csv", mime="text/csv")
 
-with col_export2:
-    st.info(f"📊 Total records: {len(df_display):,}")
+    with col_export2:
+        st.info(f"📊 Total records: {len(df_display):,}")
 
-with col_export3:
-    st.success(f"✅ {today.strftime('%b %Y')}")
+    with col_export3:
+        st.success(f"✅ {today.strftime('%b %Y')}")
