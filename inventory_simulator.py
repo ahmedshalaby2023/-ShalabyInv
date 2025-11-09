@@ -213,10 +213,24 @@ def load_ddates_sheet(file_bytes: bytes | None) -> pd.DataFrame:
     if "Qty" in ddates_df.columns:
         ddates_df["Qty"] = pd.to_numeric(ddates_df["Qty"], errors="coerce")
     
-    # Ensure Ddate is datetime
+    # Ensure Ddate is datetime even if stored as string like 'Jan-2025' or numeric
     if "Ddate" in ddates_df.columns:
         ddates_df["Ddate"] = pd.to_datetime(ddates_df["Ddate"], errors="coerce")
-    
+        if ddates_df["Ddate"].isna().any():
+            alt_dates = (
+                ddates_df["Ddate"].fillna(
+                    pd.to_datetime(ddates_df["Ddate"].astype(str).str.strip(), errors="coerce")
+                )
+            )
+            if alt_dates.isna().any() and {"Month", "Year"}.issubset(ddates_df.columns):
+                month_year_dates = pd.to_datetime(
+                    ddates_df[["Year", "Month"]].astype(str).agg("-".join, axis=1),
+                    format="%Y-%m",
+                    errors="coerce",
+                )
+                alt_dates = alt_dates.fillna(month_year_dates)
+            ddates_df["Ddate"] = alt_dates
+
     # Drop rows with missing critical data
     ddates_df = ddates_df.dropna(subset=["ItemNumber", "Qty", "Ddate"])
     
@@ -874,8 +888,14 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
                 st.write("Sample items:", list(available_items[:10]))
             return
         
-        # Sort by date
+        # Sort by date and keep only deliveries from today onward
         item_deliveries = item_deliveries.sort_values("Ddate")
+        today_floor = pd.Timestamp.today().normalize()
+        item_deliveries = item_deliveries[item_deliveries["Ddate"] >= today_floor]
+
+        if item_deliveries.empty:
+            st.info("No upcoming deliveries scheduled on or after today.")
+            return
         
         # Create timeline chart
         fig = go.Figure()
@@ -889,7 +909,7 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
                 marker={"color": "#3498db"},
                 text=item_deliveries["Qty"].apply(lambda x: f"{x:,.0f}"),
                 textposition="outside",
-                hovertemplate="<b>Date:</b> %{x|%Y-%m-%d}<br><b>Quantity:</b> %{y:,.0f}<extra></extra>",
+                hovertemplate="<b>Date:</b> %{x|%a %d-%b}<br><b>Quantity:</b> %{y:,.0f}<extra></extra>",
             )
         )
         
@@ -903,7 +923,7 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
             showlegend=True,
             xaxis=dict(
                 type="date",
-                tickformat="%Y-%m-%d",
+                tickformat="%a %d-%b",
             ),
         )
         
@@ -911,7 +931,7 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
         
         # Show data table
         display_df = item_deliveries[["Ddate", "Qty"]].copy()
-        display_df["Ddate"] = display_df["Ddate"].dt.strftime("%Y-%m-%d")
+        display_df["Ddate"] = display_df["Ddate"].dt.strftime("%a %d-%b")
         display_df = display_df.rename(columns={"Ddate": "Delivery Date", "Qty": "Quantity"})
         
         st.dataframe(
@@ -1037,6 +1057,130 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
             target_item = item_display_to_value.get(item_choice)
             if target_item is not None:
                 filtered_stage = filtered_stage[filtered_stage[item_col].astype(str).str.strip().eq(target_item)]
+
+    location_prefixes = {"location", "loc", "branch", "warehouse", "store"}
+    location_columns = []
+    for column in fg_df.columns:
+        normalized = _normalize_name(column)
+        if normalized in {"location"}:
+            location_columns.append(column)
+            continue
+        if any(normalized.startswith(prefix) for prefix in location_prefixes):
+            if column not in {factory_col, storage_col}:
+                location_columns.append(column)
+
+    fg_location_coordinates = {
+        "ramadan": {"lat": 30.2920, "lon": 31.7500},
+        "cairo": {"lat": 30.0444, "lon": 31.2357},
+        "alex": {"lat": 31.2001, "lon": 29.9187},
+        "alexandria": {"lat": 31.2001, "lon": 29.9187},
+        "gharbeya": {"lat": 30.7865, "lon": 31.0004},
+        "upper": {"lat": 25.6872, "lon": 32.6396},
+        "upperegypt": {"lat": 25.6872, "lon": 32.6396},
+        "giza": {"lat": 30.0131, "lon": 31.2089},
+        "behiera": {"lat": 31.0341, "lon": 30.4682},
+        "bahira": {"lat": 31.0341, "lon": 30.4682},
+        "zagazig": {"lat": 30.5877, "lon": 31.5020},
+        "isma3leya": {"lat": 30.6043, "lon": 32.2723},
+        "ismailia": {"lat": 30.6043, "lon": 32.2723},
+    }
+
+    if location_columns:
+        st.markdown("### 📦 Stock on Hand by Location")
+        location_totals = []
+        for column in location_columns:
+            if column not in filtered_stage.columns:
+                continue
+            numeric_series = pd.to_numeric(filtered_stage[column], errors="coerce").fillna(0)
+            total_value = float(numeric_series.sum())
+            if total_value == 0:
+                continue
+            location_totals.append({"Location": column, "StockOnHand": total_value})
+
+        if not location_totals:
+            st.info("No non-zero stock on hand found across location columns after filters.")
+        else:
+            location_df = pd.DataFrame(location_totals).sort_values("StockOnHand", ascending=False)
+            st.dataframe(
+                location_df.assign(StockOnHand=lambda df: df["StockOnHand"].map(lambda v: f"{v:,.0f}")),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            mapped_locations = []
+            for row in location_df.itertuples():
+                key = _normalize_name(row.Location)
+                coords = fg_location_coordinates.get(key)
+                if coords is None:
+                    continue
+                mapped_locations.append({
+                    "Location": row.Location,
+                    "StockOnHand": row.StockOnHand,
+                    "lat": coords["lat"],
+                    "lon": coords["lon"],
+                })
+
+            if mapped_locations:
+                mapped_df = pd.DataFrame(mapped_locations)
+                fig_location_map = go.Figure(
+                    go.Scattergeo(
+                        lon=mapped_df["lon"],
+                        lat=mapped_df["lat"],
+                        text=[
+                            f"{row.Location}<br>Stock: {row.StockOnHand:,.0f}" for row in mapped_df.itertuples()
+                        ],
+                        mode="markers",
+                        marker=dict(
+                            size=np.clip(
+                                mapped_df["StockOnHand"] / mapped_df["StockOnHand"].max() * 40,
+                                6,
+                                40,
+                            ),
+                            color=mapped_df["StockOnHand"],
+                            colorscale="Blues",
+                            colorbar=dict(title="Stock"),
+                            sizemode="diameter",
+                        ),
+                    )
+                )
+                fig_location_map.update_layout(
+                    title="Location Stock Distribution",
+                    geo=dict(
+                        scope="africa",
+                        projection=dict(type="mercator"),
+                        center=dict(lat=27.0, lon=31.0),
+                        lonaxis=dict(range=[24, 34]),
+                        lataxis=dict(range=[22, 32]),
+                        showland=True,
+                        landcolor="#f0f0f0",
+                        showcountries=True,
+                        countrycolor="#999999",
+                    ),
+                    margin=dict(l=0, r=0, t=40, b=0),
+                )
+                st.plotly_chart(fig_location_map, use_container_width=True)
+                st.caption("Locations mapped on geo chart using provided coordinates.")
+
+            if len(location_df) > 1:
+                fig_locations = go.Figure(
+                    go.Bar(
+                        x=location_df["Location"],
+                        y=location_df["StockOnHand"],
+                        text=location_df["StockOnHand"],
+                        texttemplate="%{text:,.0f}",
+                        textposition="inside",
+                        insidetextanchor="middle",
+                        marker_color="#636EFA",
+                    )
+                )
+                fig_locations.update_layout(
+                    title="Stock on Hand by Location",
+                    yaxis_title="Quantity",
+                    xaxis_title="Location",
+                    height=420,
+                    margin=dict(l=40, r=20, t=60, b=80),
+                )
+                st.plotly_chart(fig_locations, use_container_width=True)
 
     filtered_df = filtered_stage.copy()
     if filtered_df.empty:
@@ -2639,23 +2783,14 @@ def _prioritize_candidates(candidate_list, preferred_suffix):
     return ordered
 
 
-def get_requirement_series(df_input, month_info, basis="APP", include_current_extras=False):
-    basis = basis.upper()
-    candidates = build_month_column_candidates(month_info, basis, current_year_code)
-    extras = []
+def _resolve_month_demand(df_input, month_info, include_current_extras=False):
+    candidates = []
     if include_current_extras:
-        extras = [f"Cur{basis}"]
-        fallback_basis = "BP" if basis == "APP" else "APP"
-        extras.append(f"Cur{fallback_basis}")
-    combined_candidates = extras + candidates
-    prioritized = _prioritize_candidates(combined_candidates, basis)
+        candidates.extend(["CurAPP", "CurBP"])
+    candidates.extend(build_month_column_candidates(month_info, "APP", current_year_code))
+    candidates.extend(build_month_column_candidates(month_info, "BP", current_year_code))
+    prioritized = _prioritize_candidates(candidates, "APP")
     resolved_col = resolve_existing_column(df_input, prioritized)
-    if resolved_col is None:
-        fallback_basis = "BP" if basis == "APP" else "APP"
-        fallback_candidates = build_month_column_candidates(month_info, fallback_basis, current_year_code)
-        combined_fallback = extras + fallback_candidates
-        prioritized_fallback = _prioritize_candidates(combined_fallback, fallback_basis)
-        resolved_col = resolve_existing_column(df_input, prioritized_fallback)
     if resolved_col is not None:
         series = pd.to_numeric(df_input[resolved_col], errors="coerce").fillna(0)
         return series, str(resolved_col)
@@ -2664,7 +2799,6 @@ def get_requirement_series(df_input, month_info, basis="APP", include_current_ex
 
 def build_requirement_plan(
     df_input,
-    basis="APP",
     demand_columns: list[str] | None = None
 ):
     if df_input is None or df_input.empty:
@@ -2685,10 +2819,9 @@ def build_requirement_plan(
                 series = pd.Series(0, index=df_input.index, dtype=float)
                 column_name = demand_columns[idx]
         else:
-            series, column_name = get_requirement_series(
+            series, column_name = _resolve_month_demand(
                 df_input,
                 month_info,
-                basis=basis,
                 include_current_extras=(idx == 0)
             )
         plan.append({
@@ -2700,27 +2833,65 @@ def build_requirement_plan(
     return plan
 
 
-def get_existing_supply_series(df_input, month_info, include_current=False):
+def get_existing_supply_series(
+    df_input,
+    month_info,
+    include_current=False,
+    allowed_columns: list[str] | None = None,
+):
+    prioritized_candidates: list[str] = []
+    seen: set[str] = set()
+    allowed_set = set(allowed_columns) if allowed_columns else None
+
+    if allowed_columns:
+        for col in allowed_columns:
+            col_str = str(col)
+            if col_str not in seen:
+                prioritized_candidates.append(col_str)
+                seen.add(col_str)
+
     candidates = build_month_column_candidates(month_info, "ST", current_year_code)
     if include_current:
         candidates = ["CurST"] + candidates
-    resolved_col = resolve_existing_column(df_input, candidates)
+
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        if allowed_set is not None and candidate not in allowed_set:
+            continue
+        prioritized_candidates.append(candidate)
+        seen.add(candidate)
+
+    resolved_col = resolve_existing_column(df_input, prioritized_candidates)
     if resolved_col is not None:
         series = pd.to_numeric(df_input[resolved_col], errors="coerce").fillna(0)
         return series, str(resolved_col)
     return pd.Series(0, index=df_input.index, dtype=float), None
 
 
-def build_existing_supply_plan(df_input):
+def build_existing_supply_plan(df_input, supply_columns: list[str] | None = None):
     if df_input is None or df_input.empty:
         return []
+
+    normalized_columns: list[str] | None
+    if supply_columns:
+        normalized_columns = []
+        seen_columns: set[str] = set()
+        for col in supply_columns:
+            col_str = str(col)
+            if col_str not in seen_columns:
+                normalized_columns.append(col_str)
+                seen_columns.add(col_str)
+    else:
+        normalized_columns = None
 
     plan = []
     for idx, month_info in enumerate(months_sequence):
         series, column_name = get_existing_supply_series(
             df_input,
             month_info,
-            include_current=(idx == 0)
+            include_current=(idx == 0),
+            allowed_columns=normalized_columns,
         )
         plan.append({
             "month_idx": idx + 1,
@@ -2843,6 +3014,10 @@ def compute_supply_schedule(
 
         season_mask = season_windows.apply(lambda window: is_month_in_season(calendar_month, window))
         supply_candidate = unmet_requirement.where(season_mask, 0).copy()
+
+        month_has_existing_supply = pre_scheduled_supply.gt(0).any()
+        if month_has_existing_supply:
+            supply_candidate = pd.Series(0, index=supply_candidate.index, dtype=float)
 
         if not round_to_minqty and zero_ss_mask.any():
             demand_shortfall = (demand_series - available_stock).clip(lower=0)
@@ -3532,15 +3707,33 @@ st.markdown("---")
 st.subheader("🚚 Supply Scheduling to Protect Safety Stock")
 
 selected_demand_columns: list[str] = []
+selected_supply_columns: list[str] | None = None
 
 with st.expander("Configure supply planning scenario", expanded=False):
+    def _sanitize_column_key(value: str) -> str:
+        return re.sub(r"[^A-Za-z0-9]", "", str(value)).lower()
+
     demand_column_candidates = [
         col for col in df_filtered.columns
-        if isinstance(col, str) and (re.match(r"^[A-Za-z]{3}", col) or col.startswith("Cur"))
+        if isinstance(col, str) and (re.match(r"^[A-Za-z]{3}", col) or str(col).startswith("Cur"))
     ]
 
     if demand_column_candidates:
-        default_demand_selection = demand_column_candidates[:len(months_sequence)]
+        month26_app_bp_pattern = re.compile(
+            r"^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:20)?26(?:app|bp)$",
+            re.IGNORECASE,
+        )
+        default_demand_selection: list[str] = []
+        seen_defaults: set[str] = set()
+        for col in demand_column_candidates:
+            sanitized = _sanitize_column_key(col)
+            is_curapp = sanitized == "curapp"
+            matches_month = bool(month26_app_bp_pattern.match(sanitized))
+            if (is_curapp or matches_month) and col not in seen_defaults:
+                default_demand_selection.append(col)
+                seen_defaults.add(col)
+        if not default_demand_selection:
+            default_demand_selection = demand_column_candidates[:len(months_sequence)]
         selected_demand_columns = st.multiselect(
             "Demand columns (use order shown)",
             options=demand_column_candidates,
@@ -3548,15 +3741,7 @@ with st.expander("Configure supply planning scenario", expanded=False):
             help="Choose which columns supply planning should treat as monthly demand."
         )
 
-    col_basis, col_ssmult, col_buffer, col_round = st.columns([2,2,2,2])
-
-    with col_basis:
-        supply_basis = st.selectbox(
-            "Requirement basis",
-            options=["APP", "BP"],
-            index=0,
-            help="Choose which requirement column (APP vs BP) to use for planning future supply."
-        )
+    col_ssmult, col_buffer, col_round = st.columns([2,2,2])
 
     with col_ssmult:
         safety_multiplier = st.slider(
@@ -3585,7 +3770,7 @@ with st.expander("Configure supply planning scenario", expanded=False):
             help="If enabled, supply quantities are rounded up to the nearest MINQTY per SKU."
         )
 
-    col_ssmode, col_ssbasis = st.columns([2,3])
+    col_ssmode, col_ssinfo = st.columns([2,3])
     with col_ssmode:
         ss_mode = st.selectbox(
             "Safety stock calculation",
@@ -3594,13 +3779,8 @@ with st.expander("Configure supply planning scenario", expanded=False):
             help="Dynamic recalculates safety stock from each month's demand; static uses an average demand reference."
         )
 
-    with col_ssbasis:
-        static_basis_options = st.multiselect(
-            "Static SS reference (use averages of)",
-            options=["APP", "BP"],
-            default=["APP", "BP"],
-            help="Select which requirement columns to average when using static safety stock mode."
-        )
+    with col_ssinfo:
+        st.caption("Static mode averages the selected demand columns to compute a single reference demand.")
 
     use_existing_supply = st.checkbox(
         "Incorporate existing ST (pre-scheduled supply)",
@@ -3608,27 +3788,66 @@ with st.expander("Configure supply planning scenario", expanded=False):
         help="If enabled, existing ST columns are treated as committed supply before calculating additional quantities."
     )
 
+    if use_existing_supply:
+        month_st_general_pattern = re.compile(
+            r"^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\d*st$",
+            re.IGNORECASE,
+        )
+        month26_st_pattern = re.compile(
+            r"^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:20)?26st$",
+            re.IGNORECASE,
+        )
+        supply_column_candidates = [
+            col for col in df_filtered.columns
+            if isinstance(col, str)
+            and (
+                _sanitize_column_key(col) == "curst"
+                or month_st_general_pattern.match(_sanitize_column_key(col))
+            )
+        ]
+        if supply_column_candidates:
+            default_supply_selection: list[str] = []
+            seen_supply: set[str] = set()
+            for col in supply_column_candidates:
+                sanitized = _sanitize_column_key(col)
+                is_curst = sanitized == "curst"
+                matches_month = bool(month_st_general_pattern.match(sanitized))
+                if (is_curst or matches_month) and col not in seen_supply:
+                    default_supply_selection.append(col)
+                    seen_supply.add(col)
+            if not default_supply_selection:
+                default_supply_selection = supply_column_candidates
+            selected_supply_columns = st.multiselect(
+                "Supply columns (existing ST)",
+                options=supply_column_candidates,
+                default=default_supply_selection,
+                help="Choose which columns represent existing scheduled supply (ST)."
+            )
+
     st.caption(
         "Supply calculations use the filtered dataset only. Safety stock target is SSDays × demand/26. "
-        "Demand comes from your selected columns when provided, otherwise from the chosen APP/BP basis."
+        "Demand comes from your selected columns, or automatically from APP/BP month columns when not specified."
     )
 
 requirement_plan = build_requirement_plan(
     df_filtered,
-    basis=supply_basis,
     demand_columns=selected_demand_columns or None
 )
 ss_reference_series = None
 ss_mode_key = "dynamic"
-if ss_mode == "Static average" and static_basis_options:
+if ss_mode == "Static average" and selected_demand_columns:
     ss_reference_series = compute_static_ss_reference(
         df_filtered,
-        bases=static_basis_options,
+        bases=None,
         demand_columns=selected_demand_columns or None
     )
     ss_mode_key = "static"
 
-existing_supply_plan = build_existing_supply_plan(df_filtered) if use_existing_supply else None
+existing_supply_plan = (
+    build_existing_supply_plan(df_filtered, supply_columns=selected_supply_columns)
+    if use_existing_supply
+    else None
+)
 
 schedule_detail, schedule_summary = compute_supply_schedule(
     df_with_months,
@@ -3744,6 +3963,23 @@ else:
         )
         oh_value_sum = float((oh_series * cost_series).sum())
 
+    summary_sorted = pd.DataFrame()
+    if isinstance(schedule_summary, pd.DataFrame) and not schedule_summary.empty:
+        if "month_idx" in schedule_summary.columns:
+            summary_sorted = schedule_summary.sort_values("month_idx").reset_index(drop=True)
+        else:
+            summary_sorted = schedule_summary.reset_index(drop=True)
+
+    planned_dioh_days = None
+    planned_dioh_label = None
+    if not summary_sorted.empty:
+        last_row = summary_sorted.iloc[-1]
+        planned_base_demand = last_row.get("DemandQty", np.nan)
+        closing_qty = last_row.get("ClosingQty", np.nan)
+        if pd.notna(closing_qty) and pd.notna(planned_base_demand) and planned_base_demand > 0:
+            planned_dioh_days = (closing_qty / planned_base_demand) * 26
+            planned_dioh_label = last_row.get("Month")
+
     metric_rows = []
     if totalrem_qty_sum is not None:
         metric_rows.append(
@@ -3775,42 +4011,24 @@ else:
                 )
             )
 
+    current_dioh_display = "—"
+    if dioh_days is not None and np.isfinite(dioh_days):
+        current_dioh_display = f"{dioh_days:,.1f} days"
+    metric_rows.append(("🕒 Current DIOH", current_dioh_display))
+
+    if planned_dioh_days is not None and np.isfinite(planned_dioh_days):
+        planned_label = f"🔄 Planned DIOH ({planned_dioh_label})" if planned_dioh_label else "🔄 Planned DIOH"
+        planned_value = f"{planned_dioh_days:,.1f} days"
+    else:
+        planned_label = "🔄 Planned DIOH"
+        planned_value = "—"
+    metric_rows.append((planned_label, planned_value))
+
     if metric_rows:
         cols = st.columns(len(metric_rows))
         for col, (label, value) in zip(cols, metric_rows):
             with col:
                 st.metric(label, value)
-
-    # DIOH indicators for supply view (always quantity-based)
-    summary_sorted = schedule_summary.sort_values("month_idx").reset_index(drop=True)
-    planned_dioh_days = None
-    planned_dioh_label = None
-    if not summary_sorted.empty:
-        last_row = summary_sorted.iloc[-1]
-        planned_base_demand = np.nan
-        if len(summary_sorted) > 1:
-            planned_base_demand = summary_sorted.iloc[-1]["DemandQty"]
-        else:
-            planned_base_demand = last_row["DemandQty"]
-
-        closing_qty = last_row.get("ClosingQty", np.nan)
-        if pd.notna(closing_qty) and planned_base_demand and planned_base_demand > 0:
-            planned_dioh_days = (closing_qty / planned_base_demand) * 26
-            planned_dioh_label = last_row.get("Month")
-
-    dioh_cols = st.columns(2)
-    with dioh_cols[0]:
-        if dioh_days is not None and np.isfinite(dioh_days):
-            st.markdown(f"🕒 **Current DIOH:** {dioh_days:,.1f} days")
-        else:
-            st.markdown("🕒 **Current DIOH:** —")
-
-    with dioh_cols[1]:
-        if planned_dioh_days is not None and np.isfinite(planned_dioh_days):
-            label_suffix = f" ({planned_dioh_label})" if planned_dioh_label else ""
-            st.markdown(f"🔄 **Planned DIOH{label_suffix}:** {planned_dioh_days:,.1f} days")
-        else:
-            st.markdown("🔄 **Planned DIOH:** —")
 
     # Show totals before the chart
     st.markdown("---")
@@ -3924,31 +4142,82 @@ else:
     total_supply_field = "SupplyValue" if is_value_mode else "SupplyQty"
     ss_field = "SSTargetValue" if is_value_mode else "SSTargetQty"
 
+    months_axis = schedule_summary["Month"]
+
     supply_chart.add_trace(
         go.Bar(
-            x=schedule_summary["Month"],
+            x=months_axis,
             y=schedule_summary[demand_field],
             name="Demand",
-            marker_color="#EF553B"
+            marker_color="#EF553B",
+            text=schedule_summary[demand_field],
+            textposition="inside",
+            insidetextanchor="middle",
+            texttemplate="%{y:,.0f}"
         )
     )
+
     if use_existing_supply:
+        existing_supply_series = schedule_summary[existing_supply_field]
+        new_supply_series = schedule_summary[new_supply_field]
+        fallback_mask = existing_supply_series.fillna(0).eq(0)
+        new_topup_series = new_supply_series.where(~fallback_mask, 0)
+        new_fallback_series = new_supply_series.where(fallback_mask, 0)
+
+        if existing_supply_series.fillna(0).gt(0).any():
+            supply_chart.add_trace(
+                go.Bar(
+                    x=months_axis,
+                    y=existing_supply_series,
+                    name="Existing supply",
+                    marker_color="#636EFA",
+                    text=existing_supply_series,
+                    textposition="inside",
+                    insidetextanchor="middle",
+                    texttemplate="%{y:,.0f}"
+                )
+            )
+
+        if new_topup_series.fillna(0).gt(0).any():
+            supply_chart.add_trace(
+                go.Bar(
+                    x=months_axis,
+                    y=new_topup_series,
+                    name="Calculated supply (top-up)",
+                    marker_color="#00CC96",
+                    text=new_topup_series,
+                    textposition="inside",
+                    insidetextanchor="middle",
+                    texttemplate="%{y:,.0f}"
+                )
+            )
+
+        if new_fallback_series.fillna(0).gt(0).any():
+            supply_chart.add_trace(
+                go.Bar(
+                    x=months_axis,
+                    y=new_fallback_series,
+                    name="Calculated supply (fallback)",
+                    marker_color="#19D3F3",
+                    text=new_fallback_series,
+                    textposition="inside",
+                    insidetextanchor="middle",
+                    texttemplate="%{y:,.0f}"
+                )
+            )
+    else:
         supply_chart.add_trace(
             go.Bar(
-                x=schedule_summary["Month"],
-                y=schedule_summary[existing_supply_field],
-                name="Existing supply",
-                marker_color="#636EFA"
+                x=months_axis,
+                y=schedule_summary[total_supply_field],
+                name="Supply",
+                marker_color="#00CC96",
+                text=schedule_summary[total_supply_field],
+                textposition="inside",
+                insidetextanchor="middle",
+                texttemplate="%{y:,.0f}"
             )
         )
-    supply_chart.add_trace(
-        go.Bar(
-            x=schedule_summary["Month"],
-            y=schedule_summary[new_supply_field if use_existing_supply else total_supply_field],
-            name="Calculated supply" if use_existing_supply else "Supply",
-            marker_color="#00CC96"
-        )
-    )
     supply_chart.add_trace(
         go.Scatter(
             x=schedule_summary["Month"],
@@ -3974,7 +4243,7 @@ else:
         )
     )
     supply_chart.update_layout(
-        barmode="group",
+        barmode="stack" if use_existing_supply else "group",
         yaxis_title="Value (EGP)" if is_value_mode else "Quantity",
         xaxis_title="Month",
         height=500,
