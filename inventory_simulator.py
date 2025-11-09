@@ -535,7 +535,7 @@ def load_bom_workbook(file_bytes: bytes | None = None, *, allow_default: bool = 
     return bom_df, recipe_df
 
 
-def render_fg_explorer(materials_df: pd.DataFrame | None = None) -> None:
+def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: bytes | None = None) -> None:
     render_hero_banner(
         title="FG Explorer",
         subtitle="Analyze finished goods by cascading filters and KPIs.",
@@ -1071,7 +1071,7 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None) -> None:
 
         bom_df = recipe_df = pd.DataFrame()
         try:
-            bom_df, recipe_df = load_bom_workbook(None, allow_default=True)
+            bom_df, recipe_df = load_bom_workbook(bom_bytes, allow_default=True)
         except FileNotFoundError:
             st.warning("Default BOM workbook not found. Upload the BOM in the BOM Calculator view to enable this insight.")
         except Exception as exc:  # noqa: BLE001
@@ -2178,7 +2178,7 @@ app_view = st.sidebar.radio(
 )
 
 if app_view == "FG Explorer":
-    render_fg_explorer(df)
+    render_fg_explorer(df, bom_bytes)
     st.stop()
 elif app_view == "BOM Calculator":
     render_bom_calculator(df)
