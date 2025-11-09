@@ -959,14 +959,16 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
             if st.button("View details", key=f"fg_kpi_btn_{key}"):
                 st.session_state[f"fg_show_{key}"] = not st.session_state.get(f"fg_show_{key}", False)
 
-    # Collect all KPI detail dataframes for shortage analysis
+    # Collect KPI detail dataframes for shortage analysis (only from shown/expanded KPIs)
     all_kpi_fgs: list[pd.DataFrame] = []
     for label, key in kpi_labels:
         _, detail_df = kpi_data.get(key, (0, pd.DataFrame()))
-        if not detail_df.empty:
-            all_kpi_fgs.append(detail_df)
         
         if st.session_state.get(f"fg_show_{key}"):
+            # Add to shortage analysis only if KPI is shown
+            if not detail_df.empty:
+                all_kpi_fgs.append(detail_df)
+            
             st.markdown(f"#### {label} details")
             if detail_df.empty:
                 st.info("No matching items for this KPI.")
