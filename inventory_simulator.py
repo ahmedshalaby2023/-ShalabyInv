@@ -7,6 +7,12 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import io
 import re
+import sqlite3
+
+try:
+    from streamlit_sortables import sort_items
+except ImportError:  # pragma: no cover
+    sort_items = None
 
 FG_DEFAULT_FG_PATH = Path(
     r"C:\Users\ashalaby\OneDrive - Halwani Bros\Planning - Sources\new view 2023\FP module 23.xlsb"
@@ -2300,7 +2306,6 @@ st.set_page_config(page_title="Inventory Simulator", layout="wide")
 DEFAULT_DATA_PATH = Path(r"C:\Users\ashalaby\OneDrive - Halwani Bros\Planning - Sources\Materials.xlsb")
 SHEET_NAME = "Data"
 XLSXWRITER_AVAILABLE = True
-
 @st.cache_data
 def load_data(file_bytes: bytes | None = None):
     data_source = io.BytesIO(file_bytes) if file_bytes else DEFAULT_DATA_PATH
@@ -2389,95 +2394,319 @@ def load_calc_help(data_bytes: bytes | None = None, calc_bytes: bytes | None = N
     return pd.DataFrame()
 
 
+DATA_DB_PATH = Path("uploaded_sources.sqlite")
+
+
+def _ensure_storage():
+    conn = sqlite3.connect(DATA_DB_PATH)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS uploads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            uploaded_at TEXT NOT NULL,
+            content BLOB NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def store_uploaded_file(kind: str, filename: str, content: bytes) -> None:
+    conn = _ensure_storage()
+    try:
+        conn.execute(
+            "INSERT INTO uploads(kind, filename, uploaded_at, content) VALUES (?, ?, ?, ?)",
+            (kind, filename, datetime.utcnow().isoformat(), content),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def fetch_upload_history(kind: str, limit: int = 50) -> list[dict]:
+    conn = _ensure_storage()
+    try:
+        rows = conn.execute(
+            "SELECT id, filename, uploaded_at FROM uploads WHERE kind=? ORDER BY uploaded_at DESC LIMIT ?",
+            (kind, limit),
+        ).fetchall()
+        return [
+            {"id": row[0], "filename": row[1], "uploaded_at": row[2]}
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+def load_historical_upload(entry_id: int) -> bytes | None:
+    conn = _ensure_storage()
+    try:
+        row = conn.execute(
+            "SELECT content FROM uploads WHERE id=?",
+            (entry_id,),
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def purge_upload_history(kind: str | None = None) -> None:
+    conn = _ensure_storage()
+    try:
+        if kind:
+            conn.execute("DELETE FROM uploads WHERE kind=?", (kind,))
+        else:
+            conn.execute("DELETE FROM uploads")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # ===========================
 # 1.a Data Source Selection
 # ===========================
-st.sidebar.header("📂 Data Sources")
-
-# 1. Materials XLSB
-st.sidebar.subheader("📦 Materials Data")
-uploaded_materials = st.sidebar.file_uploader(
-    "Upload Materials XLSB",
-    type=["xlsb"],
-    help="Main materials inventory data file",
-    key="materials_uploader"
-)
-materials_bytes = uploaded_materials.getvalue() if uploaded_materials else None
+materials_bytes: bytes | None = None
+calc_help_bytes: bytes | None = None
+fg_bytes: bytes | None = None
+bom_bytes: bytes | None = None
 initial_df_count = 0
-try:
-    df, initial_df_count = load_data(materials_bytes)
-except FileNotFoundError:
-    df = pd.DataFrame()
-    initial_df_count = 0
-    st.sidebar.warning("⚠️ Default Materials file not found at:")
-    st.sidebar.caption(f"`{DEFAULT_DATA_PATH}`")
-except Exception as exc:
-    df = pd.DataFrame()
-    initial_df_count = 0
-    st.sidebar.error(f"Error loading Materials: {exc}")
+df = pd.DataFrame()
+calc_help_df = pd.DataFrame()
 
-if uploaded_materials:
-    st.sidebar.success(f"✓ {uploaded_materials.name}")
-    if initial_df_count > 0:
-        st.sidebar.caption(f"Loaded {initial_df_count:,} items")
-        if len(df) < initial_df_count:
-            st.sidebar.caption(f"⚠️ {initial_df_count - len(df):,} items filtered out (PurchTeam=0)")
-elif not df.empty:
-    st.sidebar.success(f"✓ Using default: {DEFAULT_DATA_PATH.name}")
-    st.sidebar.caption(f"Loaded {initial_df_count:,} items")
-    if len(df) < initial_df_count:
-        st.sidebar.caption(f"⚠️ {initial_df_count - len(df):,} items filtered out (PurchTeam=0)")
+if "data_source_cache" not in st.session_state:
+    st.session_state["data_source_cache"] = {
+        "materials": None,
+        "calc_help": None,
+        "fg": None,
+        "bom": None,
+    }
 
-# 2. CalcHelp Sheet
-st.sidebar.subheader("🧮 CalcHelp Sheet")
-calc_help_file = st.sidebar.file_uploader(
-    "Upload CalcHelp",
-    type=["xlsb", "xlsx"],
-    help="Monthly inventory calculation logic",
-    key="calc_help_uploader"
-)
-calc_help_bytes = calc_help_file.getvalue() if calc_help_file else None
-calc_help_df = load_calc_help(materials_bytes, calc_help_bytes)
-if calc_help_file:
-    st.sidebar.success(f"✓ {calc_help_file.name}")
-else:
-    st.sidebar.caption("Using bundled CalcHelp")
+source_cache: dict[str, dict[str, bytes | str] | None] = st.session_state["data_source_cache"]
 
-# 3. FG (Finished Goods) XLSB
-st.sidebar.subheader("🏷️ Finished Goods Data")
-uploaded_fg = st.sidebar.file_uploader(
-    "Upload FG XLSB",
-    type=["xlsb"],
-    help="Finished goods data for FG Explorer",
-    key="fg_uploader"
-)
-fg_bytes = uploaded_fg.getvalue() if uploaded_fg else None
-if uploaded_fg:
-    st.sidebar.success(f"✓ {uploaded_fg.name}")
-else:
-    st.sidebar.caption("Using default FG file")
+with st.sidebar.expander("📂 Data Sources", expanded=True):
+    st.subheader("Bulk upload data files")
+    bulk_files = st.file_uploader(
+        "Upload Materials, CalcHelp, FG, and BOM files",
+        type=["xlsb", "xlsx"],
+        accept_multiple_files=True,
+        help="Select multiple files at once; the app will auto-match them to each data source.",
+        key="bulk_data_uploader",
+    )
 
-# 4. BOM/Recipe XLSX
-st.sidebar.subheader("📋 BOM & Recipe Data")
-uploaded_bom = st.sidebar.file_uploader(
-    "Upload BOM/Recipe XLSX",
-    type=["xlsx"],
-    help="Bill of Materials and Recipe data",
-    key="bom_uploader"
-)
-bom_bytes = uploaded_bom.getvalue() if uploaded_bom else None
-if uploaded_bom:
-    st.sidebar.success(f"✓ {uploaded_bom.name}")
-else:
-    st.sidebar.caption(f"Using: {BOM_DEFAULT_PATH.name}")
+    uploaded_lookup = {uploaded.name: uploaded for uploaded in bulk_files} if bulk_files else {}
 
-st.sidebar.markdown("---")
-app_view = st.sidebar.radio(
-    "📑 Select view",
-    ("Inventory Simulator", "FG Explorer", "BOM Calculator"),
-    index=0,
-    key="main_app_view",
-)
+    def _guess_data_target(filename: str) -> str | None:
+        lowered = filename.lower()
+        if "calc" in lowered:
+            return "calc_help"
+        if "bom" in lowered or "recipe" in lowered:
+            return "bom"
+        if "fg" in lowered or "finished" in lowered:
+            return "fg"
+        if "material" in lowered or "inventory" in lowered or "stock" in lowered:
+            return "materials"
+        return None
+
+    materials_upload = None
+    calc_help_upload = None
+    fg_upload = None
+    bom_upload = None
+
+    if uploaded_lookup:
+        for current in uploaded_lookup.values():
+            target = _guess_data_target(current.name)
+            if target == "materials" and materials_upload is None:
+                materials_upload = current
+            elif target == "calc_help" and calc_help_upload is None:
+                calc_help_upload = current
+            elif target == "fg" and fg_upload is None:
+                fg_upload = current
+            elif target == "bom" and bom_upload is None:
+                bom_upload = current
+
+    def _build_source_selector(kind: str, header_label: str, default_label: str, guessed_upload):
+        st.markdown(header_label)
+        options = ["default"]
+        labels = {"default": default_label}
+        cached_entry = source_cache.get(kind)
+        if cached_entry:
+            options.append("cached")
+            labels["cached"] = f"Use saved upload ({cached_entry['name']})"
+        history_entries = fetch_upload_history(kind)
+        history_map = {f"history::{entry['id']}": entry for entry in history_entries}
+        for option_key, entry in history_map.items():
+            options.append(option_key)
+            labels[option_key] = f"History: {entry['filename']} ({entry['uploaded_at']})"
+        for fname in uploaded_lookup.keys():
+            option_key = f"upload::{fname}"
+            options.append(option_key)
+            labels[option_key] = f"Use uploaded file ({fname})"
+        default_index = 0
+        if guessed_upload is not None:
+            guessed_key = f"upload::{guessed_upload.name}"
+            if guessed_key in options:
+                default_index = options.index(guessed_key)
+        elif cached_entry:
+            default_index = options.index("cached")
+        selection = st.selectbox(
+            "Source",
+            options,
+            index=default_index,
+            key=f"{kind}_file_choice",
+            format_func=lambda opt: labels[opt],
+        )
+        return selection, history_map
+
+    def _resolve_selection(kind: str, selection: str, default_name: str, history_map: dict[str, dict]):
+        if selection == "default":
+            return None, default_name, "default"
+        if selection == "cached":
+            cached_entry = source_cache.get(kind)
+            if cached_entry:
+                return cached_entry.get("bytes"), cached_entry.get("name", default_name), "cached"
+            return None, default_name, "default"
+        if selection.startswith("history::"):
+            history_entry = history_map.get(selection)
+            if history_entry:
+                content = load_historical_upload(history_entry["id"])
+                if content is not None:
+                    source_cache[kind] = {"name": history_entry["filename"], "bytes": content}
+                    return content, history_entry["filename"], "history"
+            return None, default_name, "default"
+        if selection.startswith("upload::"):
+            filename = selection.split("upload::", 1)[1]
+            selected_upload = uploaded_lookup.get(filename)
+            if selected_upload:
+                file_bytes = selected_upload.getvalue()
+                source_cache[kind] = {"name": filename, "bytes": file_bytes}
+                store_uploaded_file(kind, filename, file_bytes)
+                return file_bytes, filename, "uploaded"
+        return None, default_name, "default"
+
+    materials_choice, materials_history_map = _build_source_selector(
+        "materials",
+        "#### 📦 Materials Data",
+        f"Use default ({DEFAULT_DATA_PATH.name})",
+        materials_upload,
+    )
+    materials_bytes, materials_selected_name, materials_source_state = _resolve_selection(
+        "materials", materials_choice, DEFAULT_DATA_PATH.name, materials_history_map
+    )
+
+    calc_choice, calc_history_map = _build_source_selector(
+        "calc_help",
+        "#### 🧮 CalcHelp Sheet",
+        "Use bundled CalcHelp",
+        calc_help_upload,
+    )
+    calc_help_bytes, calc_selected_name, calc_source_state = _resolve_selection(
+        "calc_help", calc_choice, "Bundled CalcHelp", calc_history_map
+    )
+
+    fg_choice, fg_history_map = _build_source_selector(
+        "fg",
+        "#### 🏷️ Finished Goods Data",
+        "Use default FG file",
+        fg_upload,
+    )
+    fg_bytes, fg_selected_name, fg_source_state = _resolve_selection(
+        "fg", fg_choice, FG_DEFAULT_FG_PATH.name, fg_history_map
+    )
+
+    bom_choice, bom_history_map = _build_source_selector(
+        "bom",
+        "#### 📋 BOM & Recipe Data",
+        f"Use default ({BOM_DEFAULT_PATH.name})",
+        bom_upload,
+    )
+    bom_bytes, bom_selected_name, bom_source_state = _resolve_selection(
+        "bom", bom_choice, BOM_DEFAULT_PATH.name, bom_history_map
+    )
+
+    st.markdown("#### 🧹 Manage saved uploads")
+    history_labels = {
+        "__all__": "All data sources",
+        "materials": "Materials data",
+        "calc_help": "CalcHelp sheets",
+        "fg": "Finished goods data",
+        "bom": "BOM & recipe data",
+    }
+    history_target = st.selectbox(
+        "History scope",
+        list(history_labels.keys()),
+        format_func=lambda opt: history_labels[opt],
+        key="history_delete_target",
+    )
+    if st.button("Delete saved uploads", key="delete_history_button"):
+        if history_target == "__all__":
+            purge_upload_history()
+            for cache_key in source_cache:
+                source_cache[cache_key] = None
+            message = "All saved uploads deleted."
+        else:
+            purge_upload_history(history_target)
+            source_cache[history_target] = None
+            message = f"Cleared saved uploads for {history_labels[history_target]}."
+        st.session_state["data_source_cache"] = source_cache
+        st.success(message)
+
+    try:
+        df, initial_df_count = load_data(materials_bytes)
+    except FileNotFoundError:
+        df = pd.DataFrame()
+        initial_df_count = 0
+        st.warning("⚠️ Default Materials file not found at:")
+        st.caption(f"`{DEFAULT_DATA_PATH}`")
+    except Exception as exc:
+        df = pd.DataFrame()
+        initial_df_count = 0
+        st.error(f"Error loading Materials: {exc}")
+    else:
+        if materials_source_state == "uploaded":
+            st.success(f"✓ {materials_selected_name}")
+        elif materials_source_state == "cached":
+            st.success(f"✓ Using saved upload: {materials_selected_name}")
+        else:
+            st.success(f"✓ Using default: {DEFAULT_DATA_PATH.name}")
+        if initial_df_count > 0:
+            st.caption(f"Loaded {initial_df_count:,} items")
+            if len(df) < initial_df_count:
+                st.caption(f"⚠️ {initial_df_count - len(df):,} items filtered out (PurchTeam=0)")
+
+    calc_help_df = load_calc_help(materials_bytes, calc_help_bytes)
+    if calc_source_state == "uploaded":
+        st.success(f"✓ {calc_selected_name}")
+    elif calc_source_state == "cached":
+        st.success(f"✓ Using saved upload: {calc_selected_name}")
+    else:
+        st.caption("Using bundled CalcHelp")
+
+    if fg_source_state == "uploaded":
+        st.success(f"✓ {fg_selected_name}")
+    elif fg_source_state == "cached":
+        st.success(f"✓ Using saved upload: {fg_selected_name}")
+    else:
+        st.caption("Using default FG file")
+
+    if bom_source_state == "uploaded":
+        st.success(f"✓ {bom_selected_name}")
+    elif bom_source_state == "cached":
+        st.success(f"✓ Using saved upload: {bom_selected_name}")
+    else:
+        st.caption(f"Using: {BOM_DEFAULT_PATH.name}")
+
+st.session_state["data_source_cache"] = source_cache
+
+with st.sidebar.expander("📑 Application View", expanded=True):
+    app_view = st.radio(
+        "Application View",
+        ("Inventory Simulator", "FG Explorer", "BOM Calculator"),
+        index=0,
+        key="main_app_view",
+    )
 
 if app_view == "FG Explorer":
     render_fg_explorer(df, bom_bytes)
@@ -3134,81 +3363,104 @@ def compute_supply_schedule(
 # ===========================
 # 3. Sidebar Filters
 # ===========================
-st.sidebar.header("🔍 Filters")
+with st.sidebar.expander("🔍 Filters", expanded=True):
 
-# Check if Materials data is loaded
-if df.empty:
-    if initial_df_count > 0:
-        st.sidebar.warning("⚠️ All items filtered out (PurchTeam=0)")
-        st.sidebar.info("No items available with valid PurchTeam values")
+    # Check if Materials data is loaded
+    if df.empty:
+        if initial_df_count > 0:
+            st.warning("⚠️ All items filtered out (PurchTeam=0)")
+            st.info("No items available with valid PurchTeam values")
+        else:
+            st.info("📦 Please upload Materials data to use filters")
+        df_filtered = df.copy()
+        search_active = False
     else:
-        st.sidebar.info("📦 Please upload Materials data to use filters")
-    df_filtered = df.copy()
-    search_active = False
-else:
-    # SKU search (temporarily disables other filters)
-    all_search_options = [f"{str(row['ItemNumber']).zfill(6)} - {row['ItemName']}" 
-                          for _, row in df[["ItemNumber","ItemName"]].drop_duplicates().iterrows()]
-    all_search_options_sorted = sorted(all_search_options)
-    
-    # Add text input to filter the SKU list
-    search_filter = st.sidebar.text_input("🔍 Filter SKU list (type to search)", placeholder="Type item number or name...")
-    
-    # Filter options based on search text
-    if search_filter:
-        filtered_options = [opt for opt in all_search_options_sorted 
-                           if search_filter.lower() in opt.lower()]
-    else:
-        filtered_options = all_search_options_sorted
-    
-    item_search = st.sidebar.multiselect(
-        "Select SKU(s)", 
-        options=filtered_options,
-        help="Select one or more SKUs to analyze"
-    )
+        # SKU search (temporarily disables other filters)
+        all_search_options = [
+            f"{str(row['ItemNumber']).zfill(6)} - {row['ItemName']}" 
+            for _, row in df[["ItemNumber", "ItemName"]].drop_duplicates().iterrows()
+        ]
+        all_search_options_sorted = sorted(all_search_options)
 
-    df_filtered = df.copy()
-    search_active = False
-    if item_search:
-        search_active = True
-        item_codes = [item.split(" - ")[0] for item in item_search]
-        df_filtered = df_filtered[df_filtered["ItemNumber"].isin(item_codes)]
-        st.sidebar.success(f"✅ {len(item_search)} SKU(s) selected")
+        # Add text input to filter the SKU list
+        search_filter = st.text_input(
+            "🔍 Filter SKU list (type to search)",
+            placeholder="Type item number or name..."
+        )
 
-    # Other filters
-    if not search_active:
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Or use filters:")
-        
-        all_option = "All"
+        # Filter options based on search text
+        if search_filter:
+            filtered_options = [
+                opt for opt in all_search_options_sorted
+                if search_filter.lower() in opt.lower()
+            ]
+        else:
+            filtered_options = all_search_options_sorted
+
+        item_search = st.multiselect(
+            "Select SKU(s)",
+            options=filtered_options,
+            help="Select one or more SKUs to analyze",
+        )
+
+        df_filtered = df.copy()
+        search_active = False
+        if item_search:
+            search_active = True
+            item_codes = [item.split(" - ")[0] for item in item_search]
+            df_filtered = df_filtered[df_filtered["ItemNumber"].isin(item_codes)]
 
         # Factory filter
-        factories = [all_option]+sorted(df["Factory"].unique())
-        selected_factory = st.sidebar.multiselect("Select factory", factories, default=[all_option])
+        if "Factory" in df_filtered.columns:
+            factories = sorted(df_filtered["Factory"].dropna().unique())
+        else:
+            factories = []
+        all_option = "All"
+        selected_factory = st.multiselect(
+            "Select factory",
+            [all_option] + factories,
+            default=[all_option],
+        )
         if all_option not in selected_factory:
             df_filtered = df_filtered[df_filtered["Factory"].isin(selected_factory)]
 
-        # Storage type filter (depends on previous selection)
-        storages = [all_option]+sorted(df_filtered["Storagetype"].unique())
-        selected_storage = st.sidebar.multiselect("Select storage type", storages, default=[all_option])
+        # Storage type filter
+        if "Storagetype" in df_filtered.columns:
+            storages = sorted(df_filtered["Storagetype"].dropna().unique())
+        else:
+            storages = []
+        selected_storage = st.multiselect(
+            "Select storage type",
+            [all_option] + storages,
+            default=[all_option],
+        )
         if all_option not in selected_storage:
             df_filtered = df_filtered[df_filtered["Storagetype"].isin(selected_storage)]
 
         # Family filter
-        families = [all_option]+sorted(df_filtered["Family"].unique())
-        selected_family = st.sidebar.multiselect("Select family", families, default=[all_option])
+        families = [all_option] + sorted(df_filtered["Family"].unique())
+        selected_family = st.multiselect(
+            "Select family",
+            families,
+            default=[all_option],
+        )
         if all_option not in selected_family:
             df_filtered = df_filtered[df_filtered["Family"].isin(selected_family)]
 
         # Raw material type filter
-        rawtypes = [all_option]+sorted(df_filtered["RawType"].unique())
-        selected_rawtype = st.sidebar.multiselect("Select raw material type", rawtypes, default=[all_option])
+        rawtypes = [all_option] + sorted(df_filtered["RawType"].unique())
+        selected_rawtype = st.multiselect(
+            "Select raw material type",
+            rawtypes,
+            default=[all_option],
+        )
         if all_option not in selected_rawtype:
             df_filtered = df_filtered[df_filtered["RawType"].isin(selected_rawtype)]
 
 # Additional options
-time_grouping = st.sidebar.radio("📆 Time view:", ["Monthly","Quarterly","Yearly"], index=0)
-use_next3m = st.sidebar.checkbox("📈 Use Next 3 Months forecast (Next3M)", value=True)
+with st.sidebar.expander("⚙️ Additional Options", expanded=False):
+    time_grouping = st.radio("📆 Time view:", ["Monthly","Quarterly","Yearly"], index=0)
+    use_next3m = st.checkbox("📈 Use Next 3 Months forecast (Next3M)", value=True)
 
 # ===========================
 # 4. Calculations
@@ -3687,91 +3939,120 @@ def render_abc_analysis():
 
     st.caption(f"ABC analysis uses column '{next_month_series_name}' for next-month consumption.")
 
-dioh_days, dioh_basis_label = render_inventory_dashboard()
-render_abc_analysis()
+with st.expander("📊 Inventory Dashboard", expanded=True):
+    dioh_days, dioh_basis_label = render_inventory_dashboard()
+
+with st.expander("🧮 ABC Inventory Classification", expanded=False):
+    render_abc_analysis()
 
 # ===========================
 # 7. Summary Table
 # ===========================
-if not search_active:
-    # Only use grouping columns that exist in the dataframe
-    potential_grouping_cols = ["Factory","Storagetype","Family","RawType"]
-    grouping_cols = [col for col in potential_grouping_cols if col in df_filtered.columns]
-    
-    if grouping_cols and not df_filtered.empty:
-        summary_base = df_filtered.copy()
-        summary_base["OH_value"] = summary_base["OH"] * summary_base["Cost"]
-        summary = summary_base.groupby(grouping_cols, as_index=False).agg({
-            "ItemNumber": "nunique",
-            "OH_value": "sum"
-        }).rename(columns={"ItemNumber": "Unique SKUs"})
+with st.expander("📊 Summary Table", expanded=False):
+    if not search_active:
+        # Only use grouping columns that exist in the dataframe
+        potential_grouping_cols = ["Factory","Storagetype","Family","RawType"]
+        grouping_cols = [col for col in potential_grouping_cols if col in df_filtered.columns]
 
-        month1_values = df_with_months.groupby(grouping_cols, as_index=False)[["Month_1_value"]].sum()
-        summary = summary.merge(month1_values, on=grouping_cols, how="left")
-        summary = summary.rename(columns={
-            "OH_value": "OH Value (EGP)",
-            "Month_1_value": "Month_1 Value (EGP)"
-        })
-        summary["Month_1 Value (EGP)"] = summary["Month_1 Value (EGP)"].fillna(0)
+        if grouping_cols and not df_filtered.empty:
+            summary_base = df_filtered.copy()
+            summary_base["OH_value"] = summary_base["OH"] * summary_base["Cost"]
+            summary = summary_base.groupby(grouping_cols, as_index=False).agg({
+                "ItemNumber": "nunique",
+                "OH_value": "sum"
+            }).rename(columns={"ItemNumber": "Unique SKUs"})
 
-        st.dataframe(
-            summary.style.format({
-                "Unique SKUs": "{:,.0f}",
-                "OH Value (EGP)": "{:,.0f}",
-                "Month_1 Value (EGP)": "{:,.0f}"
-            }),
-            use_container_width=True
-        )
-        render_excel_download_button(
-            summary,
-            "📥 Download Summary (Excel)",
-            "inventory_summary",
-            key="download_summary_excel",
-            sheet_name="Summary"
-        )
+            month1_values = df_with_months.groupby(grouping_cols, as_index=False)[["Month_1_value"]].sum()
+            summary = summary.merge(month1_values, on=grouping_cols, how="left")
+            summary = summary.rename(columns={
+                "OH_value": "OH Value (EGP)",
+                "Month_1_value": "Month_1 Value (EGP)"
+            })
+            summary["Month_1 Value (EGP)"] = summary["Month_1 Value (EGP)"].fillna(0)
+
+            st.dataframe(
+                summary.style.format({
+                    "Unique SKUs": "{:,.0f}",
+                    "OH Value (EGP)": "{:,.0f}",
+                    "Month_1 Value (EGP)": "{:,.0f}"
+                }),
+                use_container_width=True
+            )
+            render_excel_download_button(
+                summary,
+                "📥 Download Summary (Excel)",
+                "inventory_summary",
+                key="download_summary_excel",
+                sheet_name="Summary"
+            )
+        else:
+            st.info("📊 Summary table requires grouping columns (Factory, Storagetype, Family, RawType) to be present in the data.")
     else:
-        st.info("📊 Summary table requires grouping columns (Factory, Storagetype, Family, RawType) to be present in the data.")
+        st.info("📊 Summary table is hidden when SKU search is active. Clear the SKU filter to view grouped results.")
 
 # ===========================
 # 8. Supply Planning Scenarios
 # ===========================
-st.markdown("---")
-st.subheader("🚚 Supply Scheduling to Protect Safety Stock")
+with st.expander("🚚 Supply Scheduling to Protect Safety Stock", expanded=False):
+    selected_demand_columns: list[str] = []
+    selected_supply_columns: list[str] | None = None
 
-selected_demand_columns: list[str] = []
-selected_supply_columns: list[str] | None = None
+    with st.expander("⚙️ Configure supply planning scenario", expanded=False):
+        def _sanitize_column_key(value: str) -> str:
+            return re.sub(r"[^A-Za-z0-9]", "", str(value)).lower()
 
-with st.expander("Configure supply planning scenario", expanded=False):
-    def _sanitize_column_key(value: str) -> str:
-        return re.sub(r"[^A-Za-z0-9]", "", str(value)).lower()
+        demand_column_candidates = [
+            col for col in df_filtered.columns
+            if isinstance(col, str) and (re.match(r"^[A-Za-z]{3}", col) or str(col).startswith("Cur"))
+        ]
 
-    demand_column_candidates = [
-        col for col in df_filtered.columns
-        if isinstance(col, str) and (re.match(r"^[A-Za-z]{3}", col) or str(col).startswith("Cur"))
-    ]
+        if demand_column_candidates:
+            month26_app_bp_pattern = re.compile(
+                r"^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:20)?26(?:app|bp)$",
+                re.IGNORECASE,
+            )
+            default_demand_selection: list[str] = []
+            seen_defaults: set[str] = set()
+            for col in demand_column_candidates:
+                sanitized = _sanitize_column_key(col)
+                is_curapp = sanitized == "curapp"
+                matches_month = bool(month26_app_bp_pattern.match(sanitized))
+                if (is_curapp or matches_month) and col not in seen_defaults:
+                    default_demand_selection.append(col)
+                    seen_defaults.add(col)
+            if not default_demand_selection:
+                default_demand_selection = demand_column_candidates[:len(months_sequence)]
+            selected_demand_columns = st.multiselect(
+                "Demand columns (use order shown)",
+                options=demand_column_candidates,
+                default=default_demand_selection,
+                help="Choose which columns supply planning should treat as monthly demand."
+            )
 
-    if demand_column_candidates:
-        month26_app_bp_pattern = re.compile(
-            r"^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:20)?26(?:app|bp)$",
-            re.IGNORECASE,
-        )
-        default_demand_selection: list[str] = []
-        seen_defaults: set[str] = set()
-        for col in demand_column_candidates:
-            sanitized = _sanitize_column_key(col)
-            is_curapp = sanitized == "curapp"
-            matches_month = bool(month26_app_bp_pattern.match(sanitized))
-            if (is_curapp or matches_month) and col not in seen_defaults:
-                default_demand_selection.append(col)
-                seen_defaults.add(col)
-        if not default_demand_selection:
-            default_demand_selection = demand_column_candidates[:len(months_sequence)]
-        selected_demand_columns = st.multiselect(
-            "Demand columns (use order shown)",
-            options=demand_column_candidates,
-            default=default_demand_selection,
-            help="Choose which columns supply planning should treat as monthly demand."
-        )
+            if selected_demand_columns:
+                st.markdown("**Drag to rearrange selected demand columns:**")
+                if sort_items is not None:
+                    previous_order = st.session_state.get("_demand_column_order", [])
+                    base_order = [col for col in previous_order if col in selected_demand_columns]
+                    base_order.extend(
+                        [col for col in selected_demand_columns if col not in base_order]
+                    )
+                    reordered = sort_items(
+                        base_order,
+                        direction="vertical",
+                        key="demand_column_sorter"
+                    )
+                    ordered_selection = [col for col in reordered if col in selected_demand_columns]
+                    ordered_selection.extend(
+                        [col for col in selected_demand_columns if col not in ordered_selection]
+                    )
+                    st.session_state["_demand_column_order"] = ordered_selection
+                    selected_demand_columns = ordered_selection
+                else:
+                    st.info(
+                        "Install `streamlit-sortables` to enable drag-and-drop ordering. "
+                        "Current selection order will be used."
+                    )
 
     col_ssmult, col_buffer, col_round = st.columns([2,2,2])
 
@@ -3861,310 +4142,308 @@ with st.expander("Configure supply planning scenario", expanded=False):
         "Demand comes from your selected columns, or automatically from APP/BP month columns when not specified."
     )
 
-requirement_plan = build_requirement_plan(
-    df_filtered,
-    demand_columns=selected_demand_columns or None
-)
-ss_reference_series = None
-ss_mode_key = "dynamic"
-if ss_mode == "Static average" and selected_demand_columns:
-    ss_reference_series = compute_static_ss_reference(
+    requirement_plan = build_requirement_plan(
         df_filtered,
-        bases=None,
         demand_columns=selected_demand_columns or None
     )
-    ss_mode_key = "static"
+    ss_reference_series = None
+    ss_mode_key = "dynamic"
+    if ss_mode == "Static average" and selected_demand_columns:
+        ss_reference_series = compute_static_ss_reference(
+            df_filtered,
+            bases=None,
+            demand_columns=selected_demand_columns or None
+        )
+        ss_mode_key = "static"
 
-existing_supply_plan = (
-    build_existing_supply_plan(df_filtered, supply_columns=selected_supply_columns)
-    if use_existing_supply
-    else None
-)
-
-schedule_detail, schedule_summary = compute_supply_schedule(
-    df_with_months,
-    requirement_plan,
-    safety_multiplier=safety_multiplier,
-    buffer_days=additional_ss_days,
-    round_to_minqty=round_to_minqty,
-    ss_mode=ss_mode_key,
-    static_reference=ss_reference_series,
-    existing_supply_plan=existing_supply_plan
-)
-
-if schedule_summary.empty:
-    st.warning("⚠️ Insufficient data to produce a supply schedule for the current filters.")
-    st.markdown("""
-    ### Possible reasons:
-    - **No items match your filters** - Try adjusting or removing filters
-    - **PurchTeam = 0 items excluded** - Items with PurchTeam = 0 are automatically filtered out
-    - **Missing required columns** - Check that your Materials file has APP/BP columns for future months
-    - **No demand data** - Ensure your data includes monthly demand forecasts
-    
-    ### Troubleshooting:
-    1. Check the "Filtered SKUs" count in the dashboard above
-    2. If it shows 0 or very few items, adjust your filters
-    3. Verify your Materials file includes the required columns
-    """)
-    
-    # Show diagnostic info
-    with st.expander("🔍 Diagnostic Information"):
-        st.write(f"**Filtered items count:** {len(df_filtered)}")
-        st.write(f"**Items with months data:** {len(df_with_months)}")
-        if not df_filtered.empty:
-            st.write(f"**Available columns:** {', '.join(df_filtered.columns.tolist()[:20])}...")
-else:
-    display_mode = st.radio(
-        "Display mode",
-        options=["Quantity", "Value"],
-        index=0,
-        horizontal=True,
-        help="Toggle between unit-based and value-based supply planning views."
+    existing_supply_plan = (
+        build_existing_supply_plan(df_filtered, supply_columns=selected_supply_columns)
+        if use_existing_supply
+        else None
     )
 
-    is_value_mode = display_mode == "Value"
+    schedule_detail, schedule_summary = compute_supply_schedule(
+        df_with_months,
+        requirement_plan,
+        safety_multiplier=safety_multiplier,
+        buffer_days=additional_ss_days,
+        round_to_minqty=round_to_minqty,
+        ss_mode=ss_mode_key,
+        static_reference=ss_reference_series,
+        existing_supply_plan=existing_supply_plan
+    )
 
-    with st.expander("🔍 Demand source diagnostics", expanded=False):
-        demand_debug_rows = []
-        for entry in requirement_plan:
-            series = entry.get("series")
-            demand_debug_rows.append(
-                {
-                    "Month": entry.get("month", {}).get("code"),
-                    "Resolved column": entry.get("source_column"),
-                    "Demand (sum)": float(series.sum()) if isinstance(series, pd.Series) else np.nan,
-                }
-            )
-        if demand_debug_rows:
-            debug_df = pd.DataFrame(demand_debug_rows)
-            st.dataframe(debug_df, use_container_width=True)
-        else:
-            st.info("No demand rows available for the current selection.")
+    if schedule_summary.empty:
+        st.warning("⚠️ Insufficient data to produce a supply schedule for the current filters.")
+        st.markdown("""
+        ### Possible reasons:
+        - **No items match your filters** - Try adjusting or removing filters
+        - **PurchTeam = 0 items excluded** - Items with PurchTeam = 0 are automatically filtered out
+        - **Missing required columns** - Check that your Materials file has APP/BP columns for future months
+        - **No demand data** - Ensure your data includes monthly demand forecasts
 
-    if (
-        search_active
-        and item_search
-        and len(item_search) == 1
-        and "Season" in df_filtered.columns
-    ):
-        selected_code_raw = item_search[0].split(" - ")[0].strip()
-        selected_code = _canonical_item_code(selected_code_raw)
+        ### Troubleshooting:
+        1. Check the "Filtered SKUs" count in the dashboard above
+        2. If it shows 0 or very few items, adjust your filters
+        3. Verify your Materials file includes the required columns
+        """)
 
-        seasonal_candidates = df_filtered.copy()
-        seasonal_candidates["__canonical_item"] = seasonal_candidates["ItemNumber"].apply(_canonical_item_code)
-        season_values = seasonal_candidates.loc[
-            seasonal_candidates["__canonical_item"] == selected_code, "Season"
-        ]
+        # Show diagnostic info
+        with st.expander("🔍 Diagnostic Information"):
+            st.write(f"**Filtered items count:** {len(df_filtered)}")
+            st.write(f"**Items with months data:** {len(df_with_months)}")
+            if not df_filtered.empty:
+                st.write(f"**Available columns:** {', '.join(df_filtered.columns.tolist()[:20])}...")
+    else:
+        display_mode = st.radio(
+            "Display mode",
+            options=["Quantity", "Value"],
+            index=0,
+            horizontal=True,
+            help="Toggle between unit-based and value-based supply planning views."
+        )
 
-        if not season_values.empty:
-            cleaned_seasons = (
-                season_values.astype(str).str.strip().replace({"nan": ""})
-            )
-            cleaned_seasons = cleaned_seasons[cleaned_seasons.ne("")]
-            if not cleaned_seasons.empty:
-                unique_windows = sorted({value for value in cleaned_seasons})
-                season_text = ", ".join(unique_windows)
-                st.warning(
-                    f"🌤️ **Seasonal SKU selected.** Seasonal window: {season_text}. "
-                    "Supply outside this window may be constrained."
+        is_value_mode = display_mode == "Value"
+
+        with st.expander("🔍 Demand source diagnostics", expanded=False):
+            demand_debug_rows = []
+            for entry in requirement_plan:
+                series = entry.get("series")
+                demand_debug_rows.append(
+                    {
+                        "Month": entry.get("month", {}).get("code"),
+                        "Resolved column": entry.get("source_column"),
+                        "Demand (sum)": float(series.sum()) if isinstance(series, pd.Series) else np.nan,
+                    }
                 )
+            if demand_debug_rows:
+                debug_df = pd.DataFrame(demand_debug_rows)
+                st.dataframe(debug_df, use_container_width=True)
+            else:
+                st.info("No demand rows available for the current selection.")
 
-    totalrem_qty_sum = None
-    totalrem_value_sum = None
-    if "totalremQty" in df_filtered.columns:
-        totalrem_qty_series = pd.to_numeric(df_filtered["totalremQty"], errors="coerce").fillna(0)
-        totalrem_qty_sum = float(totalrem_qty_series.sum())
+        if (
+            search_active
+            and item_search
+            and len(item_search) == 1
+            and "Season" in df_filtered.columns
+        ):
+            selected_code_raw = item_search[0].split(" - ")[0].strip()
+            selected_code = _canonical_item_code(selected_code_raw)
 
-        cost_series = (
-            pd.to_numeric(df_filtered.get("Cost", 0), errors="coerce").fillna(0)
-            if "Cost" in df_filtered.columns
-            else pd.Series(0, index=totalrem_qty_series.index)
-        )
-        totalrem_value_sum = float((totalrem_qty_series * cost_series).sum())
+            seasonal_candidates = df_filtered.copy()
+            seasonal_candidates["__canonical_item"] = seasonal_candidates["ItemNumber"].apply(_canonical_item_code)
+            season_values = seasonal_candidates.loc[
+                seasonal_candidates["__canonical_item"] == selected_code, "Season"
+            ]
 
-    oh_qty_sum = None
-    oh_value_sum = None
-    if "OH" in df_filtered.columns:
-        oh_series = pd.to_numeric(df_filtered["OH"], errors="coerce").fillna(0)
-        oh_qty_sum = float(oh_series.sum())
+            if not season_values.empty:
+                cleaned_seasons = (
+                    season_values.astype(str).str.strip().replace({"nan": ""})
+                )
+                cleaned_seasons = cleaned_seasons[cleaned_seasons.ne("")]
+                if not cleaned_seasons.empty:
+                    unique_windows = sorted({value for value in cleaned_seasons})
+                    season_text = ", ".join(unique_windows)
+                    st.warning(
+                        f"🌤️ **Seasonal SKU selected.** Seasonal window: {season_text}. "
+                        "Supply outside this window may be constrained."
+                    )
 
-        cost_series = (
-            pd.to_numeric(df_filtered.get("Cost", 0), errors="coerce").fillna(0)
-            if "Cost" in df_filtered.columns
-            else pd.Series(0, index=oh_series.index)
-        )
-        oh_value_sum = float((oh_series * cost_series).sum())
+        totalrem_qty_sum = None
+        totalrem_value_sum = None
+        if "totalremQty" in df_filtered.columns:
+            totalrem_qty_series = pd.to_numeric(df_filtered["totalremQty"], errors="coerce").fillna(0)
+            totalrem_qty_sum = float(totalrem_qty_series.sum())
 
-    summary_sorted = pd.DataFrame()
-    if isinstance(schedule_summary, pd.DataFrame) and not schedule_summary.empty:
-        if "month_idx" in schedule_summary.columns:
-            summary_sorted = schedule_summary.sort_values("month_idx").reset_index(drop=True)
-        else:
-            summary_sorted = schedule_summary.reset_index(drop=True)
-
-    planned_dioh_days = None
-    planned_dioh_label = None
-    if not summary_sorted.empty:
-        last_row = summary_sorted.iloc[-1]
-        planned_base_demand = last_row.get("DemandQty", np.nan)
-        closing_qty = last_row.get("ClosingQty", np.nan)
-        if pd.notna(closing_qty) and pd.notna(planned_base_demand) and planned_base_demand > 0:
-            planned_dioh_days = (closing_qty / planned_base_demand) * 26
-            planned_dioh_label = last_row.get("Month")
-
-    metric_rows = []
-    if totalrem_qty_sum is not None:
-        metric_rows.append(
-            (
-                "📦 totalremQty (from data)",
-                format_magnitude(totalrem_qty_sum, " units"),
+            cost_series = (
+                pd.to_numeric(df_filtered.get("Cost", 0), errors="coerce").fillna(0)
+                if "Cost" in df_filtered.columns
+                else pd.Series(0, index=totalrem_qty_series.index)
             )
-        )
-        if totalrem_value_sum is not None:
+            totalrem_value_sum = float((totalrem_qty_series * cost_series).sum())
+
+        oh_qty_sum = None
+        oh_value_sum = None
+        if "OH" in df_filtered.columns:
+            oh_series = pd.to_numeric(df_filtered["OH"], errors="coerce").fillna(0)
+            oh_qty_sum = float(oh_series.sum())
+
+            cost_series = (
+                pd.to_numeric(df_filtered.get("Cost", 0), errors="coerce").fillna(0)
+                if "Cost" in df_filtered.columns
+                else pd.Series(0, index=oh_series.index)
+            )
+            oh_value_sum = float((oh_series * cost_series).sum())
+
+        summary_sorted = pd.DataFrame()
+        if isinstance(schedule_summary, pd.DataFrame) and not schedule_summary.empty:
+            if "month_idx" in schedule_summary.columns:
+                summary_sorted = schedule_summary.sort_values("month_idx").reset_index(drop=True)
+            else:
+                summary_sorted = schedule_summary.reset_index(drop=True)
+
+        planned_dioh_days = None
+        planned_dioh_label = None
+        if not summary_sorted.empty:
+            last_row = summary_sorted.iloc[-1]
+            planned_base_demand = last_row.get("DemandQty", np.nan)
+            closing_qty = last_row.get("ClosingQty", np.nan)
+            if pd.notna(closing_qty) and pd.notna(planned_base_demand) and planned_base_demand > 0:
+                planned_dioh_days = (closing_qty / planned_base_demand) * 26
+                planned_dioh_label = last_row.get("Month")
+
+        metric_rows = []
+        if totalrem_qty_sum is not None:
             metric_rows.append(
                 (
-                    "💰 totalremQty value",
-                    format_magnitude(totalrem_value_sum, " EGP"),
+                    "📦 totalremQty (from data)",
+                    format_magnitude(totalrem_qty_sum, " units"),
                 )
             )
+            if totalrem_value_sum is not None:
+                metric_rows.append(
+                    (
+                        "💰 totalremQty value",
+                        format_magnitude(totalrem_value_sum, " EGP"),
+                    )
+                )
 
-    if oh_qty_sum is not None:
-        metric_rows.append(
-            (
-                "🏭 OH quantity (selected items)",
-                format_magnitude(oh_qty_sum, " units"),
-            )
-        )
-        if oh_value_sum is not None:
+        if oh_qty_sum is not None:
             metric_rows.append(
                 (
-                    "💵 OH value (selected items)",
-                    format_magnitude(oh_value_sum, " EGP"),
+                    "🏭 OH quantity (selected items)",
+                    format_magnitude(oh_qty_sum, " units"),
                 )
             )
-
-    current_dioh_display = "—"
-    if dioh_days is not None and np.isfinite(dioh_days):
-        current_dioh_display = f"{dioh_days:,.1f} days"
-    metric_rows.append(("🕒 Current DIOH", current_dioh_display))
-
-    if planned_dioh_days is not None and np.isfinite(planned_dioh_days):
-        planned_label = f"🔄 Planned DIOH ({planned_dioh_label})" if planned_dioh_label else "🔄 Planned DIOH"
-        planned_value = f"{planned_dioh_days:,.1f} days"
-    else:
-        planned_label = "🔄 Planned DIOH"
-        planned_value = "—"
-    metric_rows.append((planned_label, planned_value))
-
-    if metric_rows:
-        cols = st.columns(len(metric_rows))
-        for col, (label, value) in zip(cols, metric_rows):
-            with col:
-                st.metric(label, value)
-
-    # Show totals before the chart
-    st.markdown("---")
-    st.markdown("### 📊 Totals Summary")
-    totals_cols = st.columns(5)
-    
-    if "month_idx" in schedule_summary.columns:
-        sorted_summary = schedule_summary.sort_values("month_idx")
-    else:
-        sorted_summary = schedule_summary.copy()
-
-    month_count = len(sorted_summary) if not sorted_summary.empty else 0
-
-    if is_value_mode:
-        total_demand_value = schedule_summary["DemandValue"].sum()
-        total_supply_value = schedule_summary["SupplyValue"].sum()
-        remaining_value = total_supply_value - total_demand_value
-        final_closing_value = (
-            sorted_summary.iloc[-1]["ClosingValue"]
-            if month_count and "ClosingValue" in sorted_summary.columns
-            else np.nan
-        )
-        average_demand_value = total_demand_value / month_count if month_count else np.nan
-        average_supply_value = total_supply_value / month_count if month_count else np.nan
-        average_closing_value = (
-            sorted_summary["ClosingValue"].mean()
-            if month_count and "ClosingValue" in sorted_summary.columns
-            else np.nan
-        )
-        
-        with totals_cols[0]:
-            st.metric("📊 Total year demand", format_magnitude(total_demand_value, " EGP"))
-        with totals_cols[1]:
-            st.metric("📦 Total year supply", format_magnitude(total_supply_value, " EGP"))
-        with totals_cols[2]:
-            st.metric("💰 Total Remaining Qty", format_magnitude(remaining_value, " EGP"))
-        with totals_cols[3]:
-            st.metric("🏁 Projected closing value", format_magnitude(final_closing_value, " EGP"))
-        with totals_cols[4]:
-            st.info(
-                "\n".join(
-                    [
-                        f"**Total Remaining:**",
-                        format_magnitude(remaining_value, " EGP"),
-                        "",
-                        "This is the PRs Remaining",
-                    ]
+            if oh_value_sum is not None:
+                metric_rows.append(
+                    (
+                        "💵 OH value (selected items)",
+                        format_magnitude(oh_value_sum, " EGP"),
+                    )
                 )
-            )
 
-        if month_count:
-            avg_cols = st.columns(3)
-            with avg_cols[0]:
-                st.metric("📊 Avg monthly demand", format_magnitude(average_demand_value, " EGP"))
-            with avg_cols[1]:
-                st.metric("📦 Avg monthly supply", format_magnitude(average_supply_value, " EGP"))
-            with avg_cols[2]:
-                st.metric("🏁 Avg monthly closing", format_magnitude(average_closing_value, " EGP"))
-    else:
-        total_demand_qty = schedule_summary["DemandQty"].sum()
-        total_supply_qty = schedule_summary["SupplyQty"].sum()
-        total_closing_qty = schedule_summary["ClosingQty"].sum()
-        remaining_qty = total_supply_qty - total_demand_qty
-        final_closing_qty = (
-            sorted_summary.iloc[-1]["ClosingQty"]
-            if month_count and "ClosingQty" in sorted_summary.columns
-            else np.nan
-        )
-        average_demand_qty = total_demand_qty / month_count if month_count else np.nan
-        average_supply_qty = total_supply_qty / month_count if month_count else np.nan
-        average_closing_qty = (
-            sorted_summary["ClosingQty"].mean()
-            if month_count and "ClosingQty" in sorted_summary.columns
-            else np.nan
-        )
-        
-        with totals_cols[0]:
-            st.metric("📊 Total year demand", format_magnitude(total_demand_qty, " units"))
-        with totals_cols[1]:
-            st.metric("📦 Total year supply", format_magnitude(total_supply_qty, " units"))
-        with totals_cols[2]:
-            st.metric("📈 Total Remaining Qty", format_magnitude(remaining_qty, " units"))
-        with totals_cols[3]:
-            st.metric("🏁 Projected closing stock", format_magnitude(final_closing_qty, " units"))
-        with totals_cols[4]:
-            st.info(
-                "\n".join(
-                    [
-                        f"**Total Remaining Qty:**",
-                        format_magnitude(remaining_qty, " units"),
-                        "",
-                        "This is the PRs Remaining",
-                    ]
+        current_dioh_display = "—"
+        if dioh_days is not None and np.isfinite(dioh_days):
+            current_dioh_display = f"{dioh_days:,.1f} days"
+        metric_rows.append(("🕒 Current DIOH", current_dioh_display))
+
+        if planned_dioh_days is not None and np.isfinite(planned_dioh_days):
+            planned_label = f"🔄 Planned DIOH ({planned_dioh_label})" if planned_dioh_label else "🔄 Planned DIOH"
+            planned_value = f"{planned_dioh_days:,.1f} days"
+        else:
+            planned_label = "🔄 Planned DIOH"
+            planned_value = "—"
+        metric_rows.append((planned_label, planned_value))
+
+        if metric_rows:
+            cols = st.columns(len(metric_rows))
+            for col, (label, value) in zip(cols, metric_rows):
+                with col:
+                    st.metric(label, value)
+
+        with st.expander("📊 Totals Summary", expanded=False):
+            totals_cols = st.columns(5)
+
+            if "month_idx" in schedule_summary.columns:
+                sorted_summary = schedule_summary.sort_values("month_idx")
+            else:
+                sorted_summary = schedule_summary.copy()
+
+            month_count = len(sorted_summary) if not sorted_summary.empty else 0
+
+            if is_value_mode:
+                total_demand_value = schedule_summary["DemandValue"].sum()
+                total_supply_value = schedule_summary["SupplyValue"].sum()
+                remaining_value = total_supply_value - total_demand_value
+                final_closing_value = (
+                    sorted_summary.iloc[-1]["ClosingValue"]
+                    if month_count and "ClosingValue" in sorted_summary.columns
+                    else np.nan
                 )
-            )
+                average_demand_value = total_demand_value / month_count if month_count else np.nan
+                average_supply_value = total_supply_value / month_count if month_count else np.nan
+                average_closing_value = (
+                    sorted_summary["ClosingValue"].mean()
+                    if month_count and "ClosingValue" in sorted_summary.columns
+                    else np.nan
+                )
 
-        if month_count:
-            avg_cols = st.columns(3)
-            with avg_cols[0]:
-                st.metric("📊 Avg monthly demand", format_magnitude(average_demand_qty, " units"))
-            with avg_cols[1]:
-                st.metric("📦 Avg monthly supply", format_magnitude(average_supply_qty, " units"))
-            with avg_cols[2]:
-                st.metric("🏁 Avg monthly closing", format_magnitude(average_closing_qty, " units"))
+                with totals_cols[0]:
+                    st.metric("📊 Total year demand", format_magnitude(total_demand_value, " EGP"))
+                with totals_cols[1]:
+                    st.metric("📦 Total year supply", format_magnitude(total_supply_value, " EGP"))
+                with totals_cols[2]:
+                    st.metric("💰 Total Remaining Qty", format_magnitude(remaining_value, " EGP"))
+                with totals_cols[3]:
+                    st.metric("🏁 Projected closing value", format_magnitude(final_closing_value, " EGP"))
+                with totals_cols[4]:
+                    st.info(
+                        "\n".join(
+                            [
+                                "**Total Remaining:**",
+                                format_magnitude(remaining_value, " EGP"),
+                                "",
+                                "This is the PRs Remaining",
+                            ]
+                        )
+                    )
+
+                if month_count:
+                    avg_cols = st.columns(3)
+                    with avg_cols[0]:
+                        st.metric("📊 Avg monthly demand", format_magnitude(average_demand_value, " EGP"))
+                    with avg_cols[1]:
+                        st.metric("📦 Avg monthly supply", format_magnitude(average_supply_value, " EGP"))
+                    with avg_cols[2]:
+                        st.metric("🏁 Avg monthly closing", format_magnitude(average_closing_value, " EGP"))
+            else:
+                total_demand_qty = schedule_summary["DemandQty"].sum()
+                total_supply_qty = schedule_summary["SupplyQty"].sum()
+                total_closing_qty = schedule_summary["ClosingQty"].sum()
+                remaining_qty = total_supply_qty - total_demand_qty
+                final_closing_qty = (
+                    sorted_summary.iloc[-1]["ClosingQty"]
+                    if month_count and "ClosingQty" in sorted_summary.columns
+                    else np.nan
+                )
+                average_demand_qty = total_demand_qty / month_count if month_count else np.nan
+                average_supply_qty = total_supply_qty / month_count if month_count else np.nan
+                average_closing_qty = (
+                    sorted_summary["ClosingQty"].mean()
+                    if month_count and "ClosingQty" in sorted_summary.columns
+                    else np.nan
+                )
+
+                with totals_cols[0]:
+                    st.metric("📊 Total year demand", format_magnitude(total_demand_qty, " units"))
+                with totals_cols[1]:
+                    st.metric("📦 Total year supply", format_magnitude(total_supply_qty, " units"))
+                with totals_cols[2]:
+                    st.metric("📈 Total Remaining Qty", format_magnitude(remaining_qty, " units"))
+                with totals_cols[3]:
+                    st.metric("🏁 Projected closing stock", format_magnitude(final_closing_qty, " units"))
+                with totals_cols[4]:
+                    st.info(
+                        "\n".join(
+                            [
+                                f"**Total Remaining Qty:**",
+                                format_magnitude(remaining_qty, " units"),
+                                "",
+                                "This is the PRs Remaining",
+                            ]
+                        )
+                    )
+
+                if month_count:
+                    avg_cols = st.columns(3)
+                    with avg_cols[0]:
+                        st.metric("📊 Avg monthly demand", format_magnitude(average_demand_qty, " units"))
+                    with avg_cols[1]:
+                        st.metric("📦 Avg monthly supply", format_magnitude(average_supply_qty, " units"))
+                    with avg_cols[2]:
+                        st.metric("🏁 Avg monthly closing", format_magnitude(average_closing_qty, " units"))
 
     st.markdown("### Supply vs Demand Trajectory")
     supply_chart = go.Figure()
