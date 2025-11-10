@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from pathlib import Path
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+from collections.abc import Iterable
 import io
 import re
 import sqlite3
@@ -15,10 +16,10 @@ except ImportError:  # pragma: no cover
     sort_items = None
 
 FG_DEFAULT_FG_PATH = Path(
-    r"C:\Users\ashalaby\OneDrive - Halwani Bros\Planning - Sources\new view 2023\FP module 23.xlsb"
+    r"C:\Users\ashalaby\OneDrive - Halwani Bros\Planning - Sources\Planning Modules\FP module 23.xlsb"
 )
 BOM_DEFAULT_PATH = Path(
-    r"C:\Users\ashalaby\OneDrive - Halwani Bros\Planning - Sources\RECIPE(ver. Dec 2018).XLSX"
+    r"C:\Users\ashalaby\OneDrive - Halwani Bros\Planning - Sources\Planning Modules\RECIPE(ver. Dec 2018).XLSX"
 )
 FG_PRIMARY_SHEETS = ("Data", "Data2")
 FG_TEXT_COLUMNS = {
@@ -591,6 +592,11 @@ def load_bom_workbook(file_bytes: bytes | None = None, *, allow_default: bool = 
                 frame[enforce_col] = frame[enforce_col].astype(str).str.strip()
 
     return bom_df, recipe_df
+
+
+def _auto_column_config(columns: Iterable) -> dict[str, st.column_config.Column]:
+    """Build Streamlit column config that auto-sizes every column."""
+    return {str(column): st.column_config.Column(width="auto") for column in columns}
 
 
 def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: bytes | None = None) -> None:
@@ -2303,7 +2309,7 @@ st.set_page_config(page_title="Inventory Simulator", layout="wide")
 # ===========================
 # 1. Load Data
 # ===========================
-DEFAULT_DATA_PATH = Path(r"C:\Users\ashalaby\OneDrive - Halwani Bros\Planning - Sources\Materials.xlsb")
+DEFAULT_DATA_PATH = Path(r"C:\Users\ashalaby\OneDrive - Halwani Bros\Planning - Sources\Planning Modules\Materials.xlsb")
 SHEET_NAME = "Data"
 XLSXWRITER_AVAILABLE = True
 @st.cache_data
@@ -3110,38 +3116,26 @@ def build_requirement_plan(
 
 def get_existing_supply_series(
     df_input,
-    month_info,
-    include_current=False,
+    month_index: int,
     allowed_columns: list[str] | None = None,
 ):
-    prioritized_candidates: list[str] = []
-    seen: set[str] = set()
-    allowed_set = set(allowed_columns) if allowed_columns else None
+    if df_input is None or df_input.empty:
+        empty_index = df_input.index if df_input is not None else pd.Index([])
+        return pd.Series(0, index=empty_index, dtype=float), None
 
-    if allowed_columns:
-        for col in allowed_columns:
-            col_str = str(col)
-            if col_str not in seen:
-                prioritized_candidates.append(col_str)
-                seen.add(col_str)
+    if not allowed_columns:
+        return pd.Series(0, index=df_input.index, dtype=float), None
 
-    candidates = build_month_column_candidates(month_info, "ST", current_year_code)
-    if include_current:
-        candidates = ["CurST"] + candidates
+    normalized = [str(col) for col in allowed_columns]
+    if month_index < 0 or month_index >= len(normalized):
+        return pd.Series(0, index=df_input.index, dtype=float), None
 
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        if allowed_set is not None and candidate not in allowed_set:
-            continue
-        prioritized_candidates.append(candidate)
-        seen.add(candidate)
+    resolved_col = normalized[month_index]
+    if resolved_col not in df_input.columns:
+        return pd.Series(0, index=df_input.index, dtype=float), None
 
-    resolved_col = resolve_existing_column(df_input, prioritized_candidates)
-    if resolved_col is not None:
-        series = pd.to_numeric(df_input[resolved_col], errors="coerce").fillna(0)
-        return series, str(resolved_col)
-    return pd.Series(0, index=df_input.index, dtype=float), None
+    series = pd.to_numeric(df_input[resolved_col], errors="coerce").fillna(0)
+    return series, resolved_col
 
 
 def build_existing_supply_plan(df_input, supply_columns: list[str] | None = None):
@@ -3164,8 +3158,7 @@ def build_existing_supply_plan(df_input, supply_columns: list[str] | None = None
     for idx, month_info in enumerate(months_sequence):
         series, column_name = get_existing_supply_series(
             df_input,
-            month_info,
-            include_current=(idx == 0),
+            month_index=idx,
             allowed_columns=normalized_columns,
         )
         plan.append({
@@ -3204,7 +3197,8 @@ def compute_supply_schedule(
     requirement_plan: list[dict],
     safety_multiplier: float = 1.0,
     buffer_days: float = 0.0,
-    round_to_minqty: bool = True,
+    rounding_mode: str = "MINQTY",
+    monthly_supply_cap: bool = False,
     ss_mode: str = "dynamic",
     static_reference: pd.Series | None = None,
     existing_supply_plan: list[dict] | None = None
@@ -3214,22 +3208,26 @@ def compute_supply_schedule(
 
     schedule_df = df_inventory[[
         col for col in [
-            "ItemNumber", "ItemName", "Unit", "Factory", "Cost", "SSDays",
+            "ItemNumber", "ItemName", "Unit", "Factory", "LT", "Cost", "SSDays",
             "MINQTY", "Month_0", "FixedSSQty", "Season"
         ] if col in df_inventory.columns
     ]].copy()
 
-    numeric_cols = ["SSDays", "MINQTY", "Month_0", "Cost", "FixedSSQty"]
+    numeric_cols = ["LT", "SSDays", "MINQTY", "Month_0", "Cost", "FixedSSQty"]
     for col in numeric_cols:
         if col in schedule_df.columns:
             schedule_df[col] = pd.to_numeric(schedule_df[col], errors="coerce").fillna(0)
 
     if "SSDays" not in schedule_df.columns:
         schedule_df["SSDays"] = 0.0
+    if "LT" not in schedule_df.columns:
+        schedule_df["LT"] = 0.0
     if "MINQTY" not in schedule_df.columns:
         schedule_df["MINQTY"] = 0.0
     if "FixedSSQty" not in schedule_df.columns:
         schedule_df["FixedSSQty"] = 0.0
+    if "Minsupply" not in schedule_df.columns:
+        schedule_df["Minsupply"] = 0.0
     if "Month_0" not in schedule_df.columns:
         schedule_df["Month_0"] = 0.0
     if "Cost" not in schedule_df.columns:
@@ -3242,12 +3240,15 @@ def compute_supply_schedule(
 
     current_stock = schedule_df["Month_0"].astype(float)
     minqty_series = schedule_df["MINQTY"].astype(float)
+    minsupply_series = schedule_df["Minsupply"].astype(float)
     ssdays_series = schedule_df["SSDays"].astype(float)
     fixed_ss_series = schedule_df["FixedSSQty"].astype(float)
     cost_series = schedule_df["Cost"].astype(float)
 
     zero_series = pd.Series(0, index=schedule_df.index, dtype=float)
     minqty_carryover = pd.Series(0, index=schedule_df.index, dtype=float)
+
+    rounding_mode_normalized = (rounding_mode or "MINQTY").strip().upper()
 
     if ss_mode.lower() == "static" and static_reference is not None:
         static_reference = pd.to_numeric(static_reference, errors="coerce").reindex(schedule_df.index).fillna(0)
@@ -3290,16 +3291,21 @@ def compute_supply_schedule(
         season_mask = season_windows.apply(lambda window: is_month_in_season(calendar_month, window))
         supply_candidate = unmet_requirement.where(season_mask, 0).copy()
 
+        supply_cap = None
+        if monthly_supply_cap:
+            supply_cap = (base_requirement - available_stock).clip(lower=0)
+            supply_candidate = pd.concat([supply_candidate, supply_cap], axis=1).min(axis=1)
+
         month_has_existing_supply = pre_scheduled_supply.gt(0).any()
         if month_has_existing_supply:
             supply_candidate = pd.Series(0, index=supply_candidate.index, dtype=float)
 
-        if not round_to_minqty and zero_ss_mask.any():
+        if rounding_mode_normalized != "MINQTY" and zero_ss_mask.any():
             demand_shortfall = (demand_series - available_stock).clip(lower=0)
             demand_shortfall = demand_shortfall.where(season_mask, 0)
             supply_candidate.loc[zero_ss_mask] = demand_shortfall.loc[zero_ss_mask]
 
-        if round_to_minqty:
+        if rounding_mode_normalized == "MINQTY":
             remaining_need = supply_candidate.copy()
 
             if not minqty_carryover.empty:
@@ -3321,6 +3327,20 @@ def compute_supply_schedule(
             rounding_excess = (rounded_supply - remaining_need).clip(lower=0)
             minqty_carryover = (minqty_carryover + rounding_excess).fillna(0)
             supply_candidate = rounded_supply
+        elif rounding_mode_normalized == "MINSUPPLY":
+            rounded_supply = supply_candidate.copy()
+            valid_mask = minsupply_series.gt(0)
+            rounding_targets = minsupply_series.where(valid_mask, np.nan)
+            if valid_mask.any():
+                rounded_supply.loc[valid_mask] = (
+                    np.ceil(
+                        (rounded_supply[valid_mask] / rounding_targets[valid_mask]).replace([np.inf, -np.inf], 0)
+                    ) * rounding_targets[valid_mask]
+                )
+            supply_candidate = rounded_supply.fillna(0)
+
+        if monthly_supply_cap and supply_cap is not None:
+            supply_candidate = pd.concat([supply_candidate, supply_cap], axis=1).min(axis=1)
 
         seasonal_supply = supply_candidate.fillna(0)
 
@@ -3328,7 +3348,7 @@ def compute_supply_schedule(
         available_post_supply = available_stock + seasonal_supply
         closing_stock = (available_post_supply - demand_series).clip(lower=0)
         seasonal_backlog = (total_requirement - available_post_supply).clip(lower=0)
-        if not round_to_minqty and zero_ss_mask.any():
+        if rounding_mode_normalized != "MINQTY" and zero_ss_mask.any():
             seasonal_backlog.loc[zero_ss_mask] = 0
 
         demand_value = demand_series * cost_series
@@ -3375,9 +3395,9 @@ def compute_supply_schedule(
     return schedule_df, summary_df
 
 # ===========================
-# 3. Sidebar Filters
+# 3. Inventory Filters
 # ===========================
-with st.sidebar.expander("🔍 Filters", expanded=True):
+with st.expander("🔍 Inventory Filters", expanded=True):
 
     # Check if Materials data is loaded
     if df.empty:
@@ -3472,7 +3492,7 @@ with st.sidebar.expander("🔍 Filters", expanded=True):
             df_filtered = df_filtered[df_filtered["RawType"].isin(selected_rawtype)]
 
 # Additional options
-with st.sidebar.expander("⚙️ Additional Options", expanded=False):
+with st.expander("⚙️ Additional Options", expanded=False):
     time_grouping = st.radio("📆 Time view:", ["Monthly","Quarterly","Yearly"], index=0)
     use_next3m = st.checkbox("📈 Use Next 3 Months forecast (Next3M)", value=True)
 
@@ -4091,11 +4111,18 @@ with st.expander("🚚 Supply Scheduling to Protect Safety Stock", expanded=Fals
         )
 
     with col_round:
-        round_to_minqty = st.checkbox(
-            "Round supply to MINQTY",
-            value=True,
-            help="If enabled, supply quantities are rounded up to the nearest MINQTY per SKU."
+        rounding_mode = st.radio(
+            "Supply rounding",
+            options=("MINQTY", "Minsupply", "Off"),
+            index=0,
+            help="Choose how to round calculated supply quantities. 'Off' keeps raw quantities."
         )
+
+    monthly_supply_cap = st.checkbox(
+        "Cap supply to a single month's requirement",
+        value=False,
+        help="When enabled, the engine won't release more supply than the demand plus safety for the selected month."
+    )
 
     col_ssmode, col_ssinfo = st.columns([2,3])
     with col_ssmode:
@@ -4181,7 +4208,8 @@ with st.expander("🚚 Supply Scheduling to Protect Safety Stock", expanded=Fals
         requirement_plan,
         safety_multiplier=safety_multiplier,
         buffer_days=additional_ss_days,
-        round_to_minqty=round_to_minqty,
+        rounding_mode=rounding_mode,
+        monthly_supply_cap=monthly_supply_cap,
         ss_mode=ss_mode_key,
         static_reference=ss_reference_series,
         existing_supply_plan=existing_supply_plan
@@ -4627,7 +4655,8 @@ with st.expander("🚚 Supply Scheduling to Protect Safety Stock", expanded=Fals
     st.dataframe(
         detail_df.style.format(_format_cell, na_rep="-"),
         use_container_width=True,
-        height=400
+        height=400,
+        column_config=_auto_column_config(detail_df.columns),
     )
     render_excel_download_button(
         detail_df,
@@ -4693,7 +4722,8 @@ else:
                 "SKU Code": lambda x: str(x).zfill(6) if pd.notna(x) and str(x).isdigit() else str(x)
             }),
             use_container_width=True,
-            height=400
+            height=400,
+            column_config=_auto_column_config(df_display.columns),
         )
 
         render_excel_download_button(
