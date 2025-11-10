@@ -2486,7 +2486,10 @@ if "data_source_cache" not in st.session_state:
 
 source_cache: dict[str, dict[str, bytes | str] | None] = st.session_state["data_source_cache"]
 
-with st.sidebar.expander("📂 Data Sources", expanded=True):
+if "save_uploads" not in st.session_state:
+    st.session_state["save_uploads"] = True
+
+with st.sidebar.expander("Data Sources", expanded=True):
     st.subheader("Bulk upload data files")
     bulk_files = st.file_uploader(
         "Upload Materials, CalcHelp, FG, and BOM files",
@@ -2495,6 +2498,16 @@ with st.sidebar.expander("📂 Data Sources", expanded=True):
         help="Select multiple files at once; the app will auto-match them to each data source.",
         key="bulk_data_uploader",
     )
+
+    save_uploads = st.checkbox(
+        "Save uploaded files for future reuse",
+        value=st.session_state["save_uploads"],
+        key="save_uploads_checkbox",
+        help="When disabled, newly uploaded files are not stored in the local database.",
+    )
+    st.session_state["save_uploads"] = save_uploads
+    if not save_uploads:
+        st.caption("New uploads will stay in-memory for this session only.")
 
     uploaded_lookup = {uploaded.name: uploaded for uploaded in bulk_files} if bulk_files else {}
 
@@ -2582,7 +2595,8 @@ with st.sidebar.expander("📂 Data Sources", expanded=True):
             if selected_upload:
                 file_bytes = selected_upload.getvalue()
                 source_cache[kind] = {"name": filename, "bytes": file_bytes}
-                store_uploaded_file(kind, filename, file_bytes)
+                if st.session_state.get("save_uploads", True):
+                    store_uploaded_file(kind, filename, file_bytes)
                 return file_bytes, filename, "uploaded"
         return None, default_name, "default"
 
