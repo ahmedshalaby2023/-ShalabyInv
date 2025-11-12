@@ -293,6 +293,15 @@ def _ensure_page_banner_styles() -> None:
     st.markdown(
         """
         <style>
+            html,
+            body,
+            [data-testid="stAppViewContainer"],
+            .stApp {
+                font-size: 20px;
+                line-height: 1.5;
+                font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+            }
+
             @keyframes heroGradientShift {
                 0% { transform: rotate(0deg) scale(1); }
                 50% { transform: rotate(1.5deg) scale(1.05); }
