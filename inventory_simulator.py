@@ -7,13 +7,20 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from collections.abc import Iterable
 import io
+import os
 import re
+import json
 import sqlite3
 
 try:
     from streamlit_sortables import sort_items
 except ImportError:  # pragma: no cover
     sort_items = None
+
+try:
+    from openai import OpenAI
+except ImportError:  # pragma: no cover
+    OpenAI = None
 
 FG_DEFAULT_FG_PATH = Path(
     r"C:\Users\ashalaby\OneDrive - Halwani Bros\Planning - Sources\Planning Modules\FP module 23.xlsb"
@@ -237,10 +244,27 @@ def load_ddates_sheet(file_bytes: bytes | None) -> pd.DataFrame:
                 )
                 alt_dates = alt_dates.fillna(month_year_dates)
             ddates_df["Ddate"] = alt_dates
+        # Remove timezone info to allow comparisons against naive timestamps
+        if pd.api.types.is_datetime64tz_dtype(ddates_df["Ddate"]):
+            ddates_df["Ddate"] = ddates_df["Ddate"].dt.tz_convert(None)
+        else:
+            try:
+                ddates_df["Ddate"] = ddates_df["Ddate"].dt.tz_localize(None)
+            except TypeError:
+                # Already timezone-naive
+                pass
 
     # Drop rows with missing critical data
     ddates_df = ddates_df.dropna(subset=["ItemNumber", "Qty", "Ddate"])
-    
+
+    raw_item_numbers = ddates_df["ItemNumber"].astype(str).str.strip()
+    canonical_numbers = raw_item_numbers.apply(_canonical_item_code)
+    ddates_df["ItemNumber_Canonical"] = canonical_numbers
+    ddates_df["ItemNumber"] = [
+        _format_item_number_display(raw, canon)
+        for raw, canon in zip(raw_item_numbers, canonical_numbers)
+    ]
+
     return ddates_df
 
 
@@ -409,13 +433,47 @@ def render_hero_banner(
 def _canonical_item_code(value: str | int | float | None) -> str:
     if value is None:
         return ""
+
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, float) or isinstance(value, np.floating):
+        if pd.isna(value):  # type: ignore[arg-type]
+            return ""
+        if float(value).is_integer():  # noqa: PLR1736
+            return str(int(value))
+        return str(value)
+
     text = str(value).strip()
     if not text:
         return ""
+
+    # Remove friendly display decorations like "000123 - ItemName"
+    if " - " in text:
+        text = text.split(" - ", 1)[0].strip()
+
+    text = text.replace(",", "")
+
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+
     if text.isdigit():
         stripped = text.lstrip("0")
         return stripped or "0"
+
     return text
+
+
+def _format_item_number_display(raw_value: str, canonical: str) -> str:
+    raw_value = str(raw_value or "").strip()
+    canonical = str(canonical or "").strip()
+    if not raw_value:
+        return canonical
+    if raw_value.isdigit():
+        min_width = 8
+        width = max(len(raw_value), len(canonical), min_width) if canonical else max(len(raw_value), min_width)
+        base = canonical or raw_value
+        return base.zfill(width)
+    return raw_value
 
 
 def _get_factory_icon(factory_name: str) -> str:
@@ -900,26 +958,47 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
                 st.write("Sample items:", list(available_items[:10]))
             return
         
-        # Sort by date and keep only deliveries from today onward
+        # Sort deliveries and prepare month filters
         item_deliveries = item_deliveries.sort_values("Ddate")
         today_floor = pd.Timestamp.today().normalize()
-        item_deliveries = item_deliveries[item_deliveries["Ddate"] >= today_floor]
+        current_month_start = today_floor.replace(day=1)
+        next_month_start = current_month_start + relativedelta(months=1)
 
-        if item_deliveries.empty:
+        current_month_deliveries = item_deliveries[
+            (item_deliveries["Ddate"] >= current_month_start)
+            & (item_deliveries["Ddate"] < next_month_start)
+        ].copy()
+
+        if current_month_deliveries.empty:
+            st.info("No deliveries scheduled in the current month.")
+        else:
+            month_display = current_month_deliveries[["Ddate", "Qty"]].copy()
+            month_display["Ddate"] = month_display["Ddate"].dt.strftime("%a %d-%b")
+            month_display = month_display.rename(columns={"Ddate": "Delivery Date", "Qty": "Quantity"})
+            st.markdown("### 📅 Current Month Deliveries")
+            st.dataframe(
+                month_display.style.format({"Quantity": "{:,.0f}"}),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        upcoming_deliveries = item_deliveries[item_deliveries["Ddate"] >= today_floor].copy()
+
+        if upcoming_deliveries.empty:
             st.info("No upcoming deliveries scheduled on or after today.")
             return
-        
+
         # Create timeline chart
         fig = go.Figure()
-        
+
         # Add bar chart for quantities
         fig.add_trace(
             go.Bar(
-                x=item_deliveries["Ddate"],
-                y=item_deliveries["Qty"],
+                x=upcoming_deliveries["Ddate"],
+                y=upcoming_deliveries["Qty"],
                 name="Delivery Quantity",
                 marker={"color": "#3498db"},
-                text=item_deliveries["Qty"].apply(lambda x: f"{x:,.0f}"),
+                text=upcoming_deliveries["Qty"].apply(lambda x: f"{x:,.0f}"),
                 textposition="outside",
                 hovertemplate="<b>Date:</b> %{x|%a %d-%b}<br><b>Quantity:</b> %{y:,.0f}<extra></extra>",
             )
@@ -942,10 +1021,11 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
         st.plotly_chart(fig, use_container_width=True)
         
         # Show data table
-        display_df = item_deliveries[["Ddate", "Qty"]].copy()
+        display_df = upcoming_deliveries[["Ddate", "Qty"]].copy()
         display_df["Ddate"] = display_df["Ddate"].dt.strftime("%a %d-%b")
         display_df = display_df.rename(columns={"Ddate": "Delivery Date", "Qty": "Quantity"})
         
+        st.markdown("### 📈 Upcoming Deliveries (from today)")
         st.dataframe(
             display_df.style.format({"Quantity": "{:,.0f}"}),
             use_container_width=True,
@@ -1047,28 +1127,102 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
             filtered_stage = filtered_stage[filtered_stage[family_col].astype(str).str.strip().eq(family_choice)]
 
     with row_two[2]:
-        item_options = ["All"]
-        item_display_to_value: dict[str, str] = {}
+        item_code = None
+        item_name = None
+        code_to_name: dict[str, str] = {}
+        name_to_code: dict[str, str] = {}
+        display_to_canonical: dict[str, str] = {}
+
         if item_col and item_col in filtered_stage.columns:
+            base_subset = filtered_stage[[item_col]].copy()
             if name_col and name_col in filtered_stage.columns:
-                item_subset = (
-                    filtered_stage[[item_col, name_col]]
-                    .dropna()
-                    .drop_duplicates()
-                    .assign(display=lambda df: df[item_col].astype(str).str.zfill(6) + " - " + df[name_col].astype(str))
+                base_subset[name_col] = filtered_stage[name_col]
+
+            base_subset = base_subset.assign(
+                ItemNumberRaw=lambda df: df[item_col].astype(str).str.strip(),
+            )
+            base_subset = base_subset[base_subset["ItemNumberRaw"] != ""].copy()
+            base_subset["ItemNumberCanonical"] = base_subset["ItemNumberRaw"].apply(_canonical_item_code)
+            base_subset["ItemNumberDisplay"] = [
+                _format_item_number_display(raw, canon)
+                for raw, canon in zip(
+                    base_subset["ItemNumberRaw"],
+                    base_subset["ItemNumberCanonical"],
                 )
-                displays = sorted(item_subset["display"].tolist())
-                item_options += displays
-                item_display_to_value = dict(zip(item_subset["display"], item_subset[item_col].astype(str)))
+            ]
+
+            if name_col and name_col in filtered_stage.columns:
+                base_subset["ItemName"] = base_subset[name_col].astype(str).str.strip()
+                base_subset.loc[base_subset["ItemName"].eq(""), "ItemName"] = None
             else:
-                item_values = _unique_sorted_values(filtered_stage, item_col)
-                item_options += item_values
-                item_display_to_value = {value: value for value in item_values}
-        item_choice = st.selectbox("Items", item_options, index=0)
-        if item_choice != "All" and item_display_to_value:
-            target_item = item_display_to_value.get(item_choice)
-            if target_item is not None:
-                filtered_stage = filtered_stage[filtered_stage[item_col].astype(str).str.strip().eq(target_item)]
+                base_subset["ItemName"] = None
+
+            canonical_to_display = (
+                base_subset.drop_duplicates("ItemNumberCanonical")
+                .set_index("ItemNumberCanonical")["ItemNumberDisplay"]
+                .to_dict()
+            )
+            display_to_canonical = {display: canon for canon, display in canonical_to_display.items()}
+
+            if name_col and name_col in filtered_stage.columns:
+                code_to_name = (
+                    base_subset.dropna(subset=["ItemName"])
+                    .drop_duplicates("ItemNumberCanonical")
+                    .set_index("ItemNumberCanonical")["ItemName"]
+                    .to_dict()
+                )
+                name_to_code = {name: canon for canon, name in code_to_name.items()}
+
+            code_options = ["All"] + sorted(display_to_canonical.keys())
+            code_default_index = 0
+            if "fg_item_code_select" in st.session_state:
+                prev_display = st.session_state["fg_item_code_select"]
+                if prev_display in code_options:
+                    code_default_index = code_options.index(prev_display)
+
+            if name_to_code:
+                code_col, name_col_container = st.columns(2)
+            else:
+                code_col = st.container()
+                name_col_container = None
+
+            with code_col:
+                item_code_display = st.selectbox(
+                    "Item Number",
+                    code_options,
+                    index=code_default_index,
+                    key="fg_item_code_select",
+                )
+
+            if item_code_display != "All":
+                item_code = display_to_canonical.get(item_code_display)
+
+            if name_to_code and name_col_container is not None:
+                name_options = ["All"] + sorted(name_to_code.keys())
+                default_name_index = 0
+                if item_code and item_code in code_to_name:
+                    related_name = code_to_name.get(item_code)
+                    if related_name in name_options:
+                        default_name_index = name_options.index(related_name)
+                with name_col_container:
+                    item_name = st.selectbox(
+                        "Item Name",
+                        name_options,
+                        index=default_name_index,
+                        key="fg_item_name_select",
+                    )
+                if item_name != "All":
+                    item_code = name_to_code.get(item_name, item_code)
+            elif not name_to_code:
+                item_name = None
+
+            if item_code:
+                filtered_stage = filtered_stage[
+                    filtered_stage[item_col].astype(str).str.strip().apply(_canonical_item_code) == item_code
+                ]
+
+    selected_item_code = item_code
+    selected_item_name = item_name if item_name not in (None, "All") else None
 
     location_prefixes = {"location", "loc", "branch", "warehouse", "store"}
     location_columns = []
@@ -1244,17 +1398,34 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
                 st.dataframe(detail_df, use_container_width=True)
 
     # Show delivery timeline if a specific item is selected
-    if item_choice != "All" and item_display_to_value:
-        target_item = item_display_to_value.get(item_choice)
-        if target_item is not None:
-            st.markdown("---")
-            st.markdown("## 🚚 Delivery Schedule")
-            try:
-                ddates_df = load_ddates_sheet(fg_bytes)
-                _render_delivery_timeline(ddates_df, target_item)
-            except Exception as exc:
-                st.warning(f"⚠️ Could not load delivery data: {exc}")
-                st.info("Make sure the FG workbook contains a 'DDates' sheet with columns: ItemNumber, Qty, Ddate")
+    if selected_item_code:
+        st.markdown("---")
+        st.markdown("## 🚚 Delivery Schedule")
+        try:
+            ddates_df = load_ddates_sheet(fg_bytes)
+            _render_delivery_timeline(ddates_df, selected_item_code)
+        except Exception as exc:
+            st.warning(f"⚠️ Could not load delivery data: {exc}")
+            st.info("Make sure the FG workbook contains a 'DDates' sheet with columns: ItemNumber, Qty, Ddate")
+
+        try:
+            ddates_df_full = load_ddates_sheet(fg_bytes)
+        except Exception:
+            ddates_df_full = pd.DataFrame()
+
+        with st.expander("📄 View DDates raw data"):
+            if ddates_df_full.empty:
+                st.info("No DDates data available to display.")
+            else:
+                display_cols = ["ItemNumber", "Qty", "Ddate"]
+                extra_cols = [col for col in ddates_df_full.columns if col not in display_cols]
+                ordered_cols = display_cols + extra_cols
+                preview_df = ddates_df_full[ordered_cols].copy()
+                preview_df["Ddate"] = preview_df["Ddate"].dt.strftime("%Y-%m-%d")
+                st.dataframe(
+                    preview_df.style.format({"Qty": "{:,.0f}"}),
+                    use_container_width=True,
+                )
 
     aggregated_row = filtered_df.sum(numeric_only=True)
     weekly_labels, weekly_series = _build_weekly_series(aggregated_row)
@@ -1737,7 +1908,7 @@ def compute_fg_material_shortage(
     }
 
 
-def render_bom_calculator(materials_df: pd.DataFrame) -> None:
+def render_bom_calculator(materials_df: pd.DataFrame, bom_bytes: bytes | None = None) -> None:
     render_hero_banner(
         title="Affordability + Availability",
         subtitle="Assess BOM cost impact and material coverage in one place.",
@@ -1746,8 +1917,10 @@ def render_bom_calculator(materials_df: pd.DataFrame) -> None:
         gradient="linear-gradient(120deg, #6a11cb 0%, #2575fc 100%)",
     )
     # Use BOM file from sidebar
-    # bom_bytes is already defined in sidebar
-    using_default_bom = uploaded_bom is None
+    # Accept bom_bytes via argument; fall back to global sidebar state when absent
+    if bom_bytes is None:
+        bom_bytes = globals().get("bom_bytes")
+    using_default_bom = bom_bytes is None
 
     if using_default_bom:
         if BOM_DEFAULT_PATH.exists():
@@ -2432,6 +2605,51 @@ def store_uploaded_file(kind: str, filename: str, content: bytes) -> None:
         conn.close()
 
 
+def _get_ai_client() -> OpenAI | None:
+    if OpenAI is None:
+        return None
+    session_api_key = st.session_state.get("ai_api_key")
+    env_api_key = os.getenv("OPENAI_API_KEY")
+    api_key = session_api_key or env_api_key
+    if not api_key:
+        return None
+    cached_client = st.session_state.get("_cached_ai_client")
+    cached_key = st.session_state.get("_cached_ai_key")
+    if cached_client is not None and cached_key == api_key:
+        return cached_client
+    try:
+        client = OpenAI(api_key=api_key)
+    except Exception:
+        return None
+    st.session_state["_cached_ai_client"] = client
+    st.session_state["_cached_ai_key"] = api_key
+    return client
+
+
+def _generate_ai_insights(
+    prompt: str,
+    *,
+    model: str = "gpt-4o-mini",
+    temperature: float = 0.3,
+    max_tokens: int = 700,
+) -> str | None:
+    client = _get_ai_client()
+    if client is None:
+        return None
+    try:
+        response = client.responses.create(
+            model=model,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+            input=[{"role": "user", "content": prompt}],
+        )
+        if response and response.output and response.output[0].content:
+            return response.output[0].content[0].text
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"AI insight request failed: {exc}")
+    return None
+
+
 def fetch_upload_history(kind: str, limit: int = 50) -> list[dict]:
     conn = _ensure_storage()
     try:
@@ -2515,6 +2733,19 @@ with st.sidebar.expander("Data Sources", expanded=True):
     if not save_uploads:
         st.caption("New uploads will stay in-memory for this session only.")
 
+    with st.popover("AI Insights Settings", use_container_width=True):
+        st.markdown("Configure AI API access to request automated insights.")
+        api_key_input = st.text_input(
+            "OpenAI API key",
+            type="password",
+            help="Stored in session_state only. Alternatively set OPENAI_API_KEY env var before running the app.",
+            value=st.session_state.get("ai_api_key", ""),
+        )
+        if api_key_input:
+            st.session_state["ai_api_key"] = api_key_input.strip()
+        elif "ai_api_key" in st.session_state:
+            st.session_state.pop("ai_api_key")
+
     uploaded_lookup = {uploaded.name: uploaded for uploaded in bulk_files} if bulk_files else {}
 
     def _guess_data_target(filename: str) -> str | None:
@@ -2570,6 +2801,10 @@ with st.sidebar.expander("Data Sources", expanded=True):
                 default_index = options.index(guessed_key)
         elif cached_entry:
             default_index = options.index("cached")
+        elif history_map:
+            first_history_key = next(iter(history_map))
+            if first_history_key in options:
+                default_index = options.index(first_history_key)
         selection = st.selectbox(
             "Source",
             options,
@@ -2732,7 +2967,7 @@ if app_view == "FG Explorer":
     render_fg_explorer(df, bom_bytes)
     st.stop()
 elif app_view == "BOM Calculator":
-    render_bom_calculator(df)
+    render_bom_calculator(df, bom_bytes)
     st.stop()
 
 # ===========================
@@ -3757,6 +3992,62 @@ def render_inventory_dashboard():
         else:
             st.metric("📆 Inventory Days", "—")
             st.caption("Requires consistent demand data")
+
+    ai_client_available = _get_ai_client() is not None
+    with st.expander("🤖 AI Insights", expanded=False):
+        st.caption(
+            "Summarize current dashboard context with an AI model. Provide an API key in the sidebar first."
+        )
+        target_columns = [
+            "ItemNumber",
+            "ItemName",
+            "Factory",
+            "Family",
+            "OH",
+            "Cost",
+            "Month_1",
+            "Month_1_value",
+        ]
+        preview_df = df_with_months[target_columns].head(100) if not df_with_months.empty else pd.DataFrame()
+        structured_payload = preview_df.to_dict(orient="records") if not preview_df.empty else []
+        insight_prompt = st.text_area(
+            "Prompt",
+            "Provide key inventory insights, risks, and suggested actions based on the attached data.",
+            help="Add specific questions or context to tailor the recommendations.",
+        )
+        generate_clicked = st.button("Generate AI insights", disabled=not ai_client_available)
+
+        if not ai_client_available:
+            st.warning("AI client not configured. Enter a valid OpenAI API key in the sidebar.")
+        elif generate_clicked:
+            if not structured_payload:
+                st.info("No inventory data available after filters; cannot generate insights.")
+            else:
+                prompt_body = {
+                    "prompt": insight_prompt,
+                    "summary_metrics": {
+                        "total_oh_value": total_oh_value,
+                        "predicted_value_total": predicted_value_total,
+                        "unique_item_count": int(unique_item_count),
+                        "inventory_days": dioh_days,
+                    },
+                    "unit_label": unit_label,
+                    "time_basis": dioh_basis_label,
+                    "records_sample": structured_payload,
+                }
+                ai_prompt = (
+                    "You are an expert inventory planner assistant. Analyze the provided JSON data and metrics "
+                    "to deliver 3-5 concise insights highlighting trends, risks, and recommended actions. "
+                    "Keep bullet points under 60 words."
+                )
+                composed_prompt = f"{ai_prompt}\n\nData JSON:\n{json.dumps(prompt_body, ensure_ascii=False)[:15000]}"
+                with st.spinner("Calling AI model..."):
+                    ai_response = _generate_ai_insights(composed_prompt)
+                if ai_response:
+                    st.markdown("### AI Summary")
+                    st.markdown(ai_response)
+                else:
+                    st.info("No response received.")
 
     # ===========================
     # 5.a Factory OH Cards
