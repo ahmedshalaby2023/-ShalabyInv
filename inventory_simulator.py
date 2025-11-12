@@ -2614,7 +2614,7 @@ def store_uploaded_file(kind: str, filename: str, content: bytes) -> None:
         conn.close()
 
 
-def _get_ai_client() -> OpenAI | None:
+def _get_ai_client() -> "OpenAI | None":
     if OpenAI is None:
         return None
     session_api_key = st.session_state.get("ai_api_key")
