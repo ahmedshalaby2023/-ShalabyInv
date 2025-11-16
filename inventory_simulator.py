@@ -1202,7 +1202,7 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
     st.markdown("### Filters")
     filtered_stage = fg_df.copy()
     row_one = st.columns(3)
-    row_two = st.columns(3)
+    row_two = st.columns([1.2, 0.8, 1.5])
 
     with row_one[0]:
         storage_col = _find_column(fg_df.columns, ["StorageType", "Storage", "Storage Type"])
@@ -1305,7 +1305,7 @@ def render_fg_explorer(materials_df: pd.DataFrame | None = None, bom_bytes: byte
                     code_default_index = code_options.index(prev_display)
 
             if name_to_code:
-                code_col, name_col_container = st.columns(2)
+                code_col, name_col_container = st.columns([1, 3])
             else:
                 code_col = st.container()
                 name_col_container = None
@@ -3002,7 +3002,7 @@ if "data_source_cache" not in st.session_state:
 source_cache: dict[str, dict[str, bytes | str] | None] = st.session_state["data_source_cache"]
 
 if "save_uploads" not in st.session_state:
-    st.session_state["save_uploads"] = True
+    st.session_state["save_uploads"] = False
 
 with st.sidebar.expander("Data Sources", expanded=True):
     st.subheader("Bulk upload data files")
@@ -3878,6 +3878,7 @@ def compute_supply_schedule(
             seasonal_backlog.loc[zero_ss_mask] = 0
 
         demand_value = demand_series * cost_series
+        demand_source_column = month_entry.get("source_column")
         closing_value = closing_stock * cost_series
         ss_value = ss_qty * cost_series
         pre_supply_value = pre_scheduled_supply * cost_series
@@ -3911,7 +3912,8 @@ def compute_supply_schedule(
             "NewSupplyValue": new_supply_value.sum(),
             "SupplyValue": total_supply_value.sum(),
             "ClosingValue": closing_value.sum(),
-            "SSTargetValue": ss_value.sum()
+            "SSTargetValue": ss_value.sum(),
+            "DemandSource": demand_source_column
         })
 
         current_stock = closing_stock
@@ -4863,11 +4865,16 @@ with st.expander("🚚 Supply Scheduling to Protect Safety Stock", expanded=Fals
 
             if not season_values.empty:
                 cleaned_seasons = (
-                    season_values.astype(str).str.strip().replace({"nan": ""})
+                    season_values.astype(str)
+                    .str.strip()
+                    .replace({"nan": "", "None": ""})
                 )
                 cleaned_seasons = cleaned_seasons[cleaned_seasons.ne("")]
-                if not cleaned_seasons.empty:
-                    unique_windows = sorted({value for value in cleaned_seasons})
+                non_zero_seasons = cleaned_seasons[
+                    ~cleaned_seasons.str.fullmatch(r"0+(\.0+)?", na=False)
+                ]
+                if not non_zero_seasons.empty:
+                    unique_windows = sorted({value for value in non_zero_seasons})
                     season_text = ", ".join(unique_windows)
                     st.warning(
                         f"🌤️ **Seasonal SKU selected.** Seasonal window: {season_text}. "
@@ -5077,24 +5084,57 @@ with st.expander("🚚 Supply Scheduling to Protect Safety Stock", expanded=Fals
     total_supply_field = "SupplyValue" if is_value_mode else "SupplyQty"
     ss_field = "SSTargetValue" if is_value_mode else "SSTargetQty"
 
-    months_axis = schedule_summary["Month"]
+    if "month_idx" in schedule_summary.columns:
+        summary_for_chart = schedule_summary.sort_values("month_idx").reset_index(drop=True)
+    else:
+        summary_for_chart = schedule_summary.reset_index(drop=True)
+
+    months_axis = summary_for_chart["Month"].astype(str).tolist()
+
+    month_idx_series = (
+        pd.to_numeric(summary_for_chart.get("month_idx"), errors="coerce")
+        if "month_idx" in summary_for_chart.columns
+        else pd.Series(np.arange(1, len(summary_for_chart) + 1), index=summary_for_chart.index)
+    )
+    demand_series = pd.to_numeric(summary_for_chart[demand_field], errors="coerce")
+
+    demand_trend_values = None
+    valid_mask = month_idx_series.notna() & demand_series.notna()
+    if valid_mask.sum() >= 2:
+        trend_x = month_idx_series[valid_mask].to_numpy(dtype=float)
+        trend_y = demand_series[valid_mask].to_numpy(dtype=float)
+        slope, intercept = np.polyfit(trend_x, trend_y, 1)
+        demand_trend_values = slope * month_idx_series.to_numpy(dtype=float) + intercept
 
     supply_chart.add_trace(
         go.Bar(
             x=months_axis,
-            y=schedule_summary[demand_field],
+            y=demand_series.to_numpy().tolist(),
             name="Demand",
             marker_color="#EF553B",
-            text=schedule_summary[demand_field],
+            text=summary_for_chart[demand_field],
             textposition="inside",
             insidetextanchor="middle",
             texttemplate="%{y:,.0f}"
         )
     )
 
+    if demand_trend_values is not None:
+        supply_chart.add_trace(
+            go.Scatter(
+                x=months_axis,
+                y=demand_trend_values,
+                name="Demand trend",
+                mode="lines",
+                line=dict(color="#AB63FA", dash="dot"),
+                hovertemplate="<b>%{x}</b><br>Trend: %{y:,.0f}" + (" EGP" if is_value_mode else " units") + "<extra></extra>",
+                connectgaps=True,
+            )
+        )
+
     if use_existing_supply:
-        existing_supply_series = schedule_summary[existing_supply_field]
-        new_supply_series = schedule_summary[new_supply_field]
+        existing_supply_series = summary_for_chart[existing_supply_field]
+        new_supply_series = summary_for_chart[new_supply_field]
         fallback_mask = existing_supply_series.fillna(0).eq(0)
         new_topup_series = new_supply_series.where(~fallback_mask, 0)
         new_fallback_series = new_supply_series.where(fallback_mask, 0)
@@ -5144,10 +5184,10 @@ with st.expander("🚚 Supply Scheduling to Protect Safety Stock", expanded=Fals
         supply_chart.add_trace(
             go.Bar(
                 x=months_axis,
-                y=schedule_summary[total_supply_field],
+                y=summary_for_chart[total_supply_field],
                 name="Supply",
                 marker_color="#00CC96",
-                text=schedule_summary[total_supply_field],
+                text=summary_for_chart[total_supply_field],
                 textposition="inside",
                 insidetextanchor="middle",
                 texttemplate="%{y:,.0f}"
@@ -5155,8 +5195,8 @@ with st.expander("🚚 Supply Scheduling to Protect Safety Stock", expanded=Fals
         )
     supply_chart.add_trace(
         go.Scatter(
-            x=schedule_summary["Month"],
-            y=schedule_summary[ss_field],
+            x=months_axis,
+            y=summary_for_chart[ss_field],
             name="Safety stock target",
             mode="lines+markers",
             line=dict(color="#636EFA", dash="dash"),
@@ -5167,8 +5207,8 @@ with st.expander("🚚 Supply Scheduling to Protect Safety Stock", expanded=Fals
     )
     supply_chart.add_trace(
         go.Scatter(
-            x=schedule_summary["Month"],
-            y=schedule_summary["ClosingValue" if is_value_mode else "ClosingQty"],
+            x=months_axis,
+            y=summary_for_chart["ClosingValue" if is_value_mode else "ClosingQty"],
             name="Projected closing stock",
             mode="lines+markers",
             line=dict(color="#FFA15A"),
@@ -5182,7 +5222,11 @@ with st.expander("🚚 Supply Scheduling to Protect Safety Stock", expanded=Fals
         yaxis_title="Value (EGP)" if is_value_mode else "Quantity",
         xaxis_title="Month",
         height=500,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        xaxis=dict(
+            categoryorder="array",
+            categoryarray=months_axis,
+        )
     )
     st.plotly_chart(supply_chart, use_container_width=True)
 
