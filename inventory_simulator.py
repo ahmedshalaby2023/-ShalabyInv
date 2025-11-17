@@ -22,6 +22,91 @@ try:
 except ImportError:  # pragma: no cover
     OpenAI = None
 
+
+AUTH_FALLBACK_USERS = {"Shalaby": "20S@ra29"}
+
+
+def _rerun_app() -> None:
+    rerun = getattr(st, "rerun", None)
+    if callable(rerun):
+        rerun()
+        return
+    legacy_rerun = getattr(st, "experimental_rerun", None)
+    if callable(legacy_rerun):  # pragma: no cover - legacy API path
+        legacy_rerun()
+
+
+def _load_auth_users() -> dict[str, str]:
+    try:
+        secret_users = getattr(st.secrets, "auth_users", {})
+    except Exception:  # pragma: no cover - secrets unavailable in tests
+        secret_users = {}
+
+    credentials: dict[str, str] = {}
+    if isinstance(secret_users, dict):
+        credentials.update({str(user).strip(): str(password) for user, password in secret_users.items() if str(user).strip() and str(password)})
+
+    env_username = os.getenv("INVENTORY_APP_USER")
+    env_password = os.getenv("INVENTORY_APP_PASSWORD")
+    if env_username and env_password:
+        credentials.setdefault(env_username.strip(), env_password)
+
+    if not credentials:
+        credentials = AUTH_FALLBACK_USERS.copy()
+    return credentials
+
+
+def _sign_out_user() -> None:
+    for key in ("auth_user", "auth_error", "auth_username_input", "auth_password_input"):
+        st.session_state.pop(key, None)
+    _rerun_app()
+
+
+def ensure_authenticated(users: dict[str, str]) -> None:
+    if not users:
+        return
+
+    current_user = st.session_state.get("auth_user")
+    if current_user and current_user not in users:
+        st.session_state.pop("auth_user", None)
+        current_user = None
+
+    if current_user and current_user in users:
+        with st.sidebar.expander("🔐 Account", expanded=True):
+            st.success(f"Signed in as **{current_user}**")
+            if st.button("Sign out", key="auth_sign_out_button"):
+                _sign_out_user()
+        return
+
+    st.sidebar.warning("Sign in to access the Halwani Schema tools.")
+
+    st.markdown("## 🔐 Sign in required")
+    st.write("Provide your username and password to continue. Credentials can be set in `.streamlit/secrets.toml` under `[auth_users]` or via `INVENTORY_APP_USER` / `INVENTORY_APP_PASSWORD` environment variables.")
+
+    with st.form("auth_login_form", clear_on_submit=False):
+        st.text_input("Username", key="auth_username_input")
+        st.text_input("Password", type="password", key="auth_password_input")
+        submitted = st.form_submit_button("Sign in", type="primary")
+
+    if submitted:
+        provided_username = str(st.session_state.get("auth_username_input", "")).strip()
+        provided_password = str(st.session_state.get("auth_password_input", ""))
+        if provided_username and users.get(provided_username) == provided_password:
+            st.session_state["auth_user"] = provided_username
+            st.session_state.pop("auth_error", None)
+            _rerun_app()
+        else:
+            st.session_state["auth_error"] = "Invalid username or password."
+
+    auth_error = st.session_state.get("auth_error")
+    if auth_error:
+        st.error(auth_error)
+
+    if users == AUTH_FALLBACK_USERS:
+        st.info("Default credentials are active (`admin` / `planner123`). Update them ASAP in secrets or environment variables.")
+
+    st.stop()
+
 FG_DEFAULT_FG_PATH = Path(
     r"C:\Users\ashalaby\OneDrive - Halwani Bros\Planning - Sources\Planning Modules\FP module 23.xlsb"
 )
@@ -2769,6 +2854,9 @@ def render_bom_calculator(materials_df: pd.DataFrame, bom_bytes: bytes | None = 
 
 
 st.set_page_config(page_title="Inventory Simulator", layout="wide")
+
+AUTH_USERS = _load_auth_users()
+ensure_authenticated(AUTH_USERS)
 
 # ===========================
 # 1. Load Data
